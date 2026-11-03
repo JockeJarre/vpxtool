@@ -67,6 +67,12 @@ So the ROM name comes from the script: sidecar `.vbs` if present, else the
 script embedded in the `.vpx`. `DMDType` / `DMDDefaultLocation` are B2S
 authoring fields and carry no usable position.
 
+`cGameName` also has look-alikes: 27 of the 1096 tables define
+`B2ScGameName = "..."`, which is the DOF/backglass name (see Game of Thrones:
+`got_137h` is the ROM, `gameofthrones` is the B2S name). A substring match
+would take the B2S name when it comes first, so the extractor requires a word
+boundary. The same pass drops `'`/`Rem` comments and quoted examples.
+
 ### `DmdDevice.ini` (source: `pinmame/dmddevice/dmddevice.cpp`)
 
 - Section = ROM name, **exact** (case-sensitive) match; `[global]` is merged in
@@ -185,7 +191,7 @@ recess including its frame.
 ## How to test
 
 ```sh
-cargo test                                             # 50 unit tests
+cargo test                                             # 58 unit tests
 cargo run --release -- scan Tables\X9 --ini DmdDevice.ini --json x9.json
 cargo run --release -- scan D:\vPinball\VisualPinball\Tables --ini DmdDevice.ini \
   --method template --json scan-final.json                                      # 104 s on 12 cores
@@ -296,8 +302,11 @@ DMD-shaped rectangle are reported as `no rect` and left alone.
 3. Stream-parse the XML (`GrillHeight`, `Displays/DMD`, `Images/BackglassImage`,
    `Images/DMDImage`, `DMDType`, `DualBackglass`) — never a DOM over 12–55 MB.
 4. ROM name: sidecar `.vbs` first, else the embedded script
-   (`vpin::vpx::open(p)?.read_gamedata()?.code.string`), per-line regex,
-   skipping `'` comments, unifying lone-CR endings.
+   (`vpin::vpx::open(p)?.read_gamedata()?.code.string`). A line is cut at a
+   `'` comment (unless the quote is inside a string) or a statement-initial
+   `Rem`, so a commented assignment is never used; `\bcGameName` must be a
+   whole identifier (not `B2ScGameName`), and the literal must not itself sit
+   inside a string. Lone-CR endings are unified first.
 5. `DmdDevice.ini`: `[global]` + `[rom]` merge, case-insensitive keys.
 6. Rect: hole, ini (mapped), authored tag, template (real grill + DMD evidence
    + no rejected flat rectangle); ratio by `--aspect`.
