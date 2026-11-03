@@ -101,6 +101,11 @@ The ROM name that keys the ini lookup is read from the table's script, the
 `GameName` is not used: it names the table (`afm_113`), not the ROM
 (`afm_113b`).
 
+Only a real assignment counts: `'` and `Rem` comments are stripped (also after
+code on the same line), the `cGameName` must be a whole identifier (the
+`B2ScGameName = "..."` DOF/backglass name does not match), and a name inside a
+string literal is ignored.
+
 ## Aspect
 
 The three sources do not agree on the shape, and the difference is bigger than
