@@ -1,7 +1,7 @@
 [package]
 name = "vpxtool"
 edition = "2024"
-version = "0.38.0"
+version = "0.39.0"
 license = "MIT"
 description = "Terminal based frontend and utilities for Visual Pinball"
 repository = "https://github.com/francisdb/vpxtool"
@@ -34,7 +34,7 @@ wild = "2.2.1"
 
 is_executable = "1.0.5"
 regex = { version = "1.12.3", features = [] }
-vpin = { version = "0.39.1", features = ["script-audit"] }
+vpin = { version = "0.40.1", features = ["script-audit", "opus"] }
 directb2s = "0.1.1"
 
 edit = "0.1.5"
