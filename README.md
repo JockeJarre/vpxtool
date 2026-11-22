@@ -183,6 +183,12 @@ vpxtool b2s extract -o images/ "table.b2spro"
 
 `b2s stampdmd` writes the `<DMD Target="Backglass" X=".." Y=".." W=".." H=".." GlassRoughness=".."/>` element into the backglass files, so B2S renders the rom's DMD inside the grill window (the punch-out). The rectangle is detected from the file itself by locating the DMD window of the grill strip in the embedded backglass image; when no window is found, the position configured for the table's rom (the `cGameName` from the table script, sidecar `.vbs` first) in `DmdDevice.ini` is mapped into the backglass image. The files are edited in place and the base64 payloads are copied through untouched, so only the DMD element changes; a `.bak` copy is kept unless `--no-backup`. Without `--write` this is a dry run. The path can be a folder tree, one `.vpx` or one `.directb2s`/`.b2spro`; the partner file of a matching name is found next to it. A file that already carries a `<DMD>` tag is the marker of a finished backglass - authored by a B2S editor or stamped by an earlier run - and is left alone; `--force` overwrites it.
 
+```sh
+vpxtool b2s import <FILE> [-d DIR]   # put the images of a `b2s extract` folder back into the file
+```
+
+`b2s import` is the counterpart of `b2s extract`: every image of the folder whose name is an element name (`backglassimage.png`, `dmdimage.png`, ...) replaces the base64 payload of that element, written back in the exact form the B2S editors use (base64, 76-char lines, `&#xD;&#xA;` line ends). Only the payload between the `Value=` quotes is rewritten, the rest of the file stays byte-identical, and a `.bak` copy is kept unless `--no-backup` - an extract followed by an import restores the file byte for byte.
+
 ```shell
 vpxtool b2s stampdmd tables/            # dry run over a folder tree
 vpxtool b2s stampdmd --write tables/    # write the files

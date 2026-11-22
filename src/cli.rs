@@ -67,6 +67,7 @@ const CMD_LOCK: &str = "lock";
 const CMD_UNLOCK: &str = "unlock";
 const CMD_LOCK_STATUS: &str = "lock-status";
 const CMD_B2S: &str = "b2s";
+const CMD_IMPORT: &str = "import";
 const CMD_B2S_STAMPDMD: &str = "stampdmd";
 
 const ARG_OUTPUT_DIR: &str = "OUTPUT_DIR";
@@ -1636,6 +1637,41 @@ fn build_command() -> Command {
                                 .long("force")
                                 .num_args(0)
                                 .help("Do not ask for confirmation before overwriting an existing output directory"),
+                        ),
+                )
+                .subcommand(
+                    Command::new(CMD_IMPORT)
+                        .about("Import images from a folder into .directb2s/.b2spro files")
+                        .long_about(
+                            "The counterpart of b2s extract: every image of the folder whose \"
+                            file name is an element name replaces the base64 payload of that \"
+                            element in the backglass file - backglassimage.png into \"
+                            <BackglassImage>, dmdimage.png into <DMDImage>, and so on. Only the \"
+                            payload between the Value= quotes is rewritten; the rest of the file \"
+                            stays byte-identical. The file is edited in place and a .bak copy is \"
+                            kept unless --no-backup.",
+                        )
+                        .arg(
+                            Arg::new("PATHS")
+                                .num_args(1..)
+                                .required(true)
+                                .value_name("FILE")
+                                .value_hint(ValueHint::AnyPath)
+                                .help("The .directb2s/.b2spro files to import into"),
+                        )
+                        .arg(
+                            Arg::new("DIR")
+                                .short('d')
+                                .long("dir")
+                                .value_name("DIR")
+                                .value_hint(ValueHint::DirPath)
+                                .help("Folder to import from. Defaults to <file>.extracted, the folder b2s extract writes, and <dir>/<stem> for several files"),
+                        )
+                        .arg(
+                            Arg::new(ARG_NO_BACKUP)
+                                .long("no-backup")
+                                .num_args(0)
+                                .help("Do not keep a .bak copy of every file that is written"),
                         ),
                 )
                 .subcommand(
@@ -4112,6 +4148,7 @@ fn verify_file(path: &str, with_sha: bool) -> VerifyReport {
 fn handle_b2s(sub_matches: &ArgMatches) -> io::Result<ExitCode> {
     match sub_matches.subcommand() {
         Some((CMD_EXTRACT, sub_matches)) => handle_b2s_extract(sub_matches),
+        Some((CMD_IMPORT, sub_matches)) => handle_b2s_import(sub_matches),
         Some((CMD_B2S_STAMPDMD, sub_matches)) => handle_b2s_stampdmd(sub_matches),
         _ => unreachable!(),
     }
@@ -4191,6 +4228,60 @@ fn handle_b2s_extract(sub_matches: &ArgMatches) -> io::Result<ExitCode> {
                 skipped.element,
                 skipped.reason
             )?;
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn handle_b2s_import(sub_matches: &ArgMatches) -> io::Result<ExitCode> {
+    let paths: Vec<PathBuf> = sub_matches
+        .get_many::<String>("PATHS")
+        .map(|values| values.map(path_exists).collect::<io::Result<_>>())
+        .transpose()?
+        .unwrap_or_default();
+    for path in &paths {
+        if !is_b2s_file(path) {
+            return Err(io::Error::other(format!(
+                "{}: not a .directb2s/.b2spro file",
+                path.display()
+            )));
+        }
+    }
+    let dir_flag = sub_matches.get_one::<String>("DIR").map(PathBuf::from);
+    let backup = !sub_matches.get_flag(ARG_NO_BACKUP);
+
+    for path in &paths {
+        // the folder b2s extract wrote for this file, by default
+        let dir = match &dir_flag {
+            Some(dir) if paths.len() == 1 => dir.clone(),
+            Some(dir) => dir.join(
+                path.file_stem()
+                    .map(|s| s.to_os_string())
+                    .unwrap_or_default(),
+            ),
+            None => path.with_extension(format!(
+                "{}.extracted",
+                path.extension()
+                    .map(|e| e.to_string_lossy().to_lowercase())
+                    .unwrap_or_else(|| "b2s".into())
+            )),
+        };
+        if !dir.is_dir() {
+            return Err(io::Error::other(format!(
+                "{} is not a folder: run b2s extract first, or pass the folder to import from",
+                dir.display()
+            )));
+        }
+        let outcome = crate::b2s::extract::import(path, &dir, backup).map_err(io::Error::other)?;
+        for imported in &outcome.replaced {
+            crate::println!(
+                "IMPORTED {} -> {}",
+                imported.source.display(),
+                path.display()
+            )?;
+        }
+        for note in &outcome.notes {
+            crate::println!("  [NOTE] {note}")?;
         }
     }
     Ok(ExitCode::SUCCESS)
