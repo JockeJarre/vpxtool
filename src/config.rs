@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+use crate::menu::{KeyMap, MenuKeys};
 use crate::vpinball_config::VPinballConfig;
 use dialoguer::Select;
 use dialoguer::theme::ColorfulTheme;
@@ -25,6 +26,12 @@ pub struct LaunchTemplate {
     pub vpinball_config: Option<PathBuf>,
 }
 
+#[derive(Deserialize, Serialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct FrontendConfig {
+    pub keys: Option<MenuKeys>,
+}
+
 #[derive(Deserialize, Serialize)]
 pub struct Config {
     pub vpx_executable: PathBuf,
@@ -35,6 +42,7 @@ pub struct Config {
     pub editor: Option<String>,
     pub launch_templates: Option<Vec<LaunchTemplate>>,
     pub vpxz_excludes: Option<Vec<String>>,
+    pub frontend: Option<FrontendConfig>,
 }
 
 #[derive(PartialEq, Debug, Clone)]
@@ -48,6 +56,7 @@ pub struct ResolvedConfig {
     pub diff: Option<String>,
     pub editor: Option<String>,
     pub vpxz_excludes: Vec<String>,
+    pub menu_keys: KeyMap,
 }
 
 pub fn default_vpxz_excludes() -> Vec<String> {
@@ -69,6 +78,20 @@ impl ResolvedConfig {
         } else {
             dirs::home_dir().unwrap().join(".pinmame")
         }
+    }
+
+    /// The ini to pass to vpinball as `-Ini` when launching with this template.
+    ///
+    /// Without a template ini, `vpx_config` is only passed when vpinball would
+    /// not find that file by itself. Forcing a versioned default would pin
+    /// launches to the settings of an older vpinball after an upgrade.
+    pub fn launch_ini<'a>(&'a self, template: &'a LaunchTemplate) -> Option<&'a Path> {
+        if let Some(ini) = &template.vpinball_config {
+            return Some(ini);
+        }
+        let custom = self.vpx_config.exists()
+            && !vpinball_finds_ini_itself(&self.vpx_config, &self.vpx_executable);
+        custom.then_some(self.vpx_config.as_path())
     }
 
     /// This path can be absolute or relative.
@@ -199,6 +222,19 @@ fn read_config(config_path: &Path) -> io::Result<ResolvedConfig> {
         generate_default_launch_templates(&config.vpx_executable)
     });
 
+    let menu_keys = KeyMap::new(
+        &config
+            .frontend
+            .and_then(|frontend| frontend.keys)
+            .unwrap_or_default(),
+    )
+    .map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Failed to load config file: {e}"),
+        )
+    })?;
+
     let resolved_config = ResolvedConfig {
         vpx_executable: config.vpx_executable,
         launch_templates,
@@ -209,6 +245,7 @@ fn read_config(config_path: &Path) -> io::Result<ResolvedConfig> {
         diff: config.diff,
         editor: config.editor,
         vpxz_excludes: config.vpxz_excludes.unwrap_or_else(default_vpxz_excludes),
+        menu_keys,
     };
     Ok(resolved_config)
 }
@@ -312,6 +349,24 @@ fn parse_major_minor(s: &str) -> Option<(u32, u32)> {
     let major = parts.next()?.parse().ok()?;
     let minor = parts.next()?.parse().ok()?;
     Some((major, minor))
+}
+
+fn vpinball_finds_ini_itself(ini: &Path, vpx_executable: &Path) -> bool {
+    ini == legacy_vpinball_ini(vpx_executable)
+        || dirs::data_dir().is_some_and(|d| is_versioned_pref_ini(ini, &d.join("VPinballX")))
+}
+
+/// Whether `ini` is `<base>/<MAJOR>.<MINOR>/VPinballX.ini`
+fn is_versioned_pref_ini(ini: &Path, base: &Path) -> bool {
+    ini.file_name().is_some_and(|name| name == "VPinballX.ini")
+        && ini.parent().is_some_and(|dir| {
+            dir.parent() == Some(base)
+                && dir
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .and_then(parse_major_minor)
+                    .is_some()
+        })
 }
 
 /// If the saved `vpx_config` is the legacy auto-generated default and the
@@ -428,6 +483,7 @@ fn write_default_config(config_file: &Path, vpx_executable: &Path) -> io::Result
         diff: None,
         editor: None,
         vpxz_excludes: None,
+        frontend: None,
     };
     write_config(config_file, &config)?;
     Ok(())
@@ -498,6 +554,75 @@ mod tests {
     use pretty_assertions::assert_eq;
     use testdir::testdir;
 
+    fn launch_ini_config(vpx_config: PathBuf) -> ResolvedConfig {
+        ResolvedConfig {
+            vpx_executable: PathBuf::from("/opt/vpinball/VPinballX_BGFX"),
+            launch_templates: vec![],
+            vpx_config,
+            tables_folder: PathBuf::from("/tables"),
+            tables_index_path: PathBuf::from("/tables/vpxtool_index.json"),
+            tables_scan_max_depth: None,
+            diff: None,
+            editor: None,
+            vpxz_excludes: vec![],
+            menu_keys: KeyMap::default(),
+        }
+    }
+
+    fn launch_ini_template(vpinball_config: Option<PathBuf>) -> LaunchTemplate {
+        LaunchTemplate {
+            name: "Launch".to_string(),
+            executable: PathBuf::from("/opt/vpinball/VPinballX_BGFX"),
+            arguments: None,
+            env: None,
+            vpinball_config,
+        }
+    }
+
+    #[test]
+    fn test_launch_ini_prefers_template_ini() -> io::Result<()> {
+        let custom = testdir!().join("custom.ini");
+        File::create(&custom)?;
+        let template_ini = PathBuf::from("/does/not/exist/template.ini");
+        let config = launch_ini_config(custom);
+        let template = launch_ini_template(Some(template_ini.clone()));
+        assert_eq!(config.launch_ini(&template), Some(template_ini.as_path()));
+        Ok(())
+    }
+
+    #[test]
+    fn test_launch_ini_falls_back_to_custom_vpx_config() -> io::Result<()> {
+        let custom = testdir!().join("custom.ini");
+        File::create(&custom)?;
+        let config = launch_ini_config(custom.clone());
+        let template = launch_ini_template(None);
+        assert_eq!(config.launch_ini(&template), Some(custom.as_path()));
+        Ok(())
+    }
+
+    #[test]
+    fn test_launch_ini_skips_missing_vpx_config() {
+        let config = launch_ini_config(testdir!().join("missing.ini"));
+        assert_eq!(config.launch_ini(&launch_ini_template(None)), None);
+    }
+
+    #[test]
+    fn test_is_versioned_pref_ini() {
+        let base = Path::new("/data/VPinballX");
+        assert!(is_versioned_pref_ini(
+            Path::new("/data/VPinballX/10.8/VPinballX.ini"),
+            base
+        ));
+        for other in [
+            "/data/VPinballX/VPinballX.ini",
+            "/data/VPinballX/10.8/fullscreen.ini",
+            "/data/VPinballX/custom/VPinballX.ini",
+            "/elsewhere/10.8/VPinballX.ini",
+        ] {
+            assert!(!is_versioned_pref_ini(Path::new(other), base), "{other}");
+        }
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn test_write_default_config_linux() -> io::Result<()> {
@@ -533,8 +658,41 @@ mod tests {
                 diff: None,
                 editor: None,
                 vpxz_excludes: default_vpxz_excludes(),
+                menu_keys: KeyMap::default(),
             }
         );
+        Ok(())
+    }
+
+    #[test]
+    fn test_read_frontend_keys() -> io::Result<()> {
+        let temp_dir = testdir!();
+        let config_file = temp_dir.join(CONFIGURATION_FILE_NAME);
+        fs::write(
+            &config_file,
+            "vpx_executable = \"/tmp/test/vpinball\"\n\
+             [frontend.keys]\n\
+             search = [\"s\"]\n",
+        )?;
+        let config = read_config(&config_file)?;
+        assert_eq!(config.menu_keys.label(crate::menu::Action::Search), "s");
+        assert_eq!(config.menu_keys.label(crate::menu::Action::Back), "esc/q");
+        Ok(())
+    }
+
+    #[test]
+    fn test_conflicting_frontend_keys_fail_to_load() -> io::Result<()> {
+        let temp_dir = testdir!();
+        let config_file = temp_dir.join(CONFIGURATION_FILE_NAME);
+        fs::write(
+            &config_file,
+            "vpx_executable = \"/tmp/test/vpinball\"\n\
+             [frontend.keys]\n\
+             search = [\"q\"]\n",
+        )?;
+        let error = read_config(&config_file).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("bound to both"), "{error}");
         Ok(())
     }
 
@@ -628,6 +786,7 @@ mod tests {
                 diff: None,
                 editor: None,
                 vpxz_excludes: default_vpxz_excludes(),
+                menu_keys: KeyMap::default(),
             }
         );
         Ok(())
@@ -665,6 +824,7 @@ mod tests {
                 diff: None,
                 editor: None,
                 vpxz_excludes: default_vpxz_excludes(),
+                menu_keys: KeyMap::default(),
             }
         );
         Ok(())
@@ -691,6 +851,7 @@ mod tests {
                 diff: None,
                 editor: None,
                 vpxz_excludes: default_vpxz_excludes(),
+                menu_keys: KeyMap::default(),
                 launch_templates: vec!(LaunchTemplate {
                     name: "Launch".to_string(),
                     executable: PathBuf::from("C:\\test\\vpinball"),
@@ -803,6 +964,7 @@ tables_scan_max_depth = 2
             diff: None,
             editor: None,
             vpxz_excludes: default_vpxz_excludes(),
+            menu_keys: KeyMap::default(),
         };
 
         // Must not panic; the broken ini is treated as unparseable.
@@ -836,6 +998,7 @@ tables_scan_max_depth = 2
             diff: None,
             editor: None,
             vpxz_excludes: default_vpxz_excludes(),
+            menu_keys: KeyMap::default(),
         };
 
         assert_eq!(

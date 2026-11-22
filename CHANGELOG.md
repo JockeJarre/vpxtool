@@ -7,6 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.40.3](https://github.com/francisdb/vpxtool/compare/v0.40.2...v0.40.3) - 2026-11-19
+
+### Other
+
+- *(deps)* bump zip from 9.5.0 to 9.6.0 ([#968](https://github.com/francisdb/vpxtool/pull/968))
+- *(deps)* bump rand from 0.10.3 to 0.10.4 ([#967](https://github.com/francisdb/vpxtool/pull/967))
+- *(deps)* bump pinmame-nvram from 0.5.4 to 0.5.5 ([#969](https://github.com/francisdb/vpxtool/pull/969))
+
+## [0.40.2](https://github.com/francisdb/vpxtool/compare/v0.40.1...v0.40.2) - 2026-11-17
+
+### Added
+
+- show indexing progress on the terminal tab and taskbar ([#965](https://github.com/francisdb/vpxtool/pull/965))
+
+## [0.40.1](https://github.com/francisdb/vpxtool/compare/v0.40.0...v0.40.1) - 2026-11-15
+
+### Fixed
+
+- bump vpin to 0.41.1, keep the physics profile, match vpinball packs ([#964](https://github.com/francisdb/vpxtool/pull/964))
+
+### Other
+
+- *(deps)* bump zip from 9.2.1 to 9.5.0 ([#961](https://github.com/francisdb/vpxtool/pull/961))
+- *(deps)* bump pinmame-nvram from 0.5.3 to 0.5.4 ([#962](https://github.com/francisdb/vpxtool/pull/962))
+
+## [0.40.0](https://github.com/francisdb/vpxtool/compare/v0.39.2...v0.40.0) - 2026-11-09
+
+### Added
+
+- *(frontend)* configurable menu keys, jump back to search ([#959](https://github.com/francisdb/vpxtool/pull/959))
+
+## [0.39.2](https://github.com/francisdb/vpxtool/compare/v0.39.1...v0.39.2) - 2026-11-09
+
+### Added
+
+- *(frontend)* edit template inis, honour custom vpx_config on launch ([#957](https://github.com/francisdb/vpxtool/pull/957))
+
+## [0.39.1](https://github.com/francisdb/vpxtool/compare/v0.39.0...v0.39.1) - 2026-11-06
+
+### Fixed
+
+- bump vpin to 0.40.2, --opus keeps short clicks of 22 kHz sounds ([#956](https://github.com/francisdb/vpxtool/pull/956))
+
+### Other
+
+- *(deps)* bump ignore from 0.4.33 to 0.4.34 ([#953](https://github.com/francisdb/vpxtool/pull/953))
+- *(deps)* bump globset from 0.4.20 to 0.4.21 ([#951](https://github.com/francisdb/vpxtool/pull/951))
+- *(deps)* bump log from 0.4.34 to 0.4.35 ([#950](https://github.com/francisdb/vpxtool/pull/950))
+- *(deps)* bump pinmame-nvram from 0.5.0 to 0.5.3 ([#952](https://github.com/francisdb/vpxtool/pull/952))
+- *(deps)* bump zip from 9.1.1 to 9.2.1 ([#954](https://github.com/francisdb/vpxtool/pull/954))
+
 ## [0.39.0](https://github.com/francisdb/vpxtool/compare/v0.38.0...v0.39.0) - 2026-11-03
 
 ### Added
