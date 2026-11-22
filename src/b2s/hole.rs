@@ -8,7 +8,7 @@
 
 use image::{Rgba, RgbaImage};
 
-use crate::Rect;
+use crate::b2s::Rect;
 
 /// Parameters used by vpxtool: 6x6 seeds, colour deviation of 5 per channel.
 /// The minimum width is a fraction of the image width: vpxtool uses 1/2 for the

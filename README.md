@@ -68,6 +68,7 @@ Commands:
   lock         Lock a vpx file, preventing edits in vpinball
   unlock       Unlock a vpx file
   lock-status  Show the lock state of a vpx file
+  b2s          Handle DirectB2S/B2S-Pro backglass files (.directb2s/.b2spro)
   convert      Converts a vpx file to a table pack, or a table pack to a vpx file
   assemble     Assembles a vpx file
   patch        Applies a VPURemix System patch to a table
@@ -168,6 +169,28 @@ vpxtool optimize --max-image-size=768 table.vpx
 ```
 
 `audit` reports the findings these fixes act on, next to everything else it checks.
+
+### Backglass files (B2S)
+
+`b2s` handles the backglass files of Visual Pinball: `.directb2s` (DirectB2S) and `.b2spro` (B2S-Pro). Both are XML with the images stored base64-encoded and a `<DMD>` element describing the DMD punch-out.
+
+`b2s extract` writes the embedded images (backglass, DMD, thumbnail, ...) next to the file in a `<file>.extracted` folder, with the extension taken from the real format of the payload.
+
+```shell
+vpxtool b2s extract "table.directb2s"
+vpxtool b2s extract -o images/ "table.b2spro"
+```
+
+`b2s stampdmd` writes the `<DMD Target="Backglass" X=".." Y=".." W=".." H=".." GlassRoughness=".."/>` element into the backglass files, so B2S renders the rom's DMD inside the grill window (the punch-out). The rectangle is detected from the file itself by locating the DMD window of the grill strip in the embedded backglass image; when no window is found, the position configured for the table's rom (the `cGameName` from the table script, sidecar `.vbs` first) in `DmdDevice.ini` is mapped into the backglass image. The files are edited in place and the base64 payloads are copied through untouched, so only the DMD element changes; a `.bak` copy is kept unless `--no-backup`. Without `--write` this is a dry run. The path can be a folder tree, one `.vpx` or one `.directb2s`/`.b2spro`; the partner file of a matching name is found next to it.
+
+```shell
+vpxtool b2s stampdmd tables/            # dry run over a folder tree
+vpxtool b2s stampdmd --write tables/    # write the files
+vpxtool b2s stampdmd "table.directb2s"  # one backglass, table found next to it
+vpxtool b2s stampdmd --method ini --ini DmdDevice.ini tables/
+```
+
+See [src/b2s/DESIGN.md](src/b2s/DESIGN.md) for how the detection works.
 
 ### Logging
 

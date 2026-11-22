@@ -2,6 +2,7 @@
 //! file, and works out the DMD rectangle to stamp.
 
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 use std::sync::{LazyLock, Mutex};
@@ -9,12 +10,13 @@ use std::sync::{LazyLock, Mutex};
 use regex::Regex;
 use serde::Serialize;
 
-use crate::b2s::{self, B2sFile};
-use crate::dmdini::DmdDeviceIni;
-use crate::hole;
-use crate::rom;
-use crate::stamp;
-use crate::{default_ini, Aspect, Grid, Method, Rect};
+use crate::b2s::dmdini::DmdDeviceIni;
+use crate::b2s::hole;
+use crate::b2s::report;
+use crate::b2s::rom;
+use crate::b2s::stamp;
+use crate::b2s::xml::{self as b2s, B2sFile};
+use crate::b2s::{Aspect, Grid, Method, Rect, default_ini};
 
 /// The extensions that hold the backglass XML. The real world is messy: `.B2SPro`
 /// and `.directb2sPRO` turn up in the same folder as `.directb2s`, and
@@ -24,70 +26,74 @@ use crate::{default_ini, Aspect, Grid, Method, Rect};
 /// missing, because writing the wrong file is worse than doing nothing.
 const EXTENSIONS: &[&str] = &["directb2s", "b2spro"];
 
-#[derive(clap::Args, Debug, Clone)]
-pub struct ScanArgs {
+/// What to stamp: a folder tree of tables, one `.vpx`, or one
+/// `.directb2s` / `.b2spro` file.
+#[derive(Debug, Clone)]
+pub enum Target {
     /// folder tree to scan for *.vpx
-    pub root: PathBuf,
+    Directory(PathBuf),
+    /// a single .vpx, its backglass is found next to it
+    Table(PathBuf),
+    /// a single .directb2s/.b2spro, its table is found next to it
+    B2s(PathBuf),
+}
 
-    /// path of DmdDevice.ini, defaults to the standard VPinball location
-    #[arg(long)]
+/// The options of `vpxtool b2s stampdmd`, assembled by the cli layer.
+#[derive(Debug, Clone)]
+pub struct ScanArgs {
+    pub target: Target,
+
+    /// path of DmdDevice.ini, defaults to the standard VPinball locations
     pub ini: Option<PathBuf>,
 
     /// how to derive the rectangle
-    #[arg(long, value_enum, default_value = "auto")]
     pub method: Method,
 
     /// skip hole detection: no image decoding, so ini-only and much faster
-    #[arg(long)]
     pub no_hole: bool,
 
     /// write the collected data as JSON for analysis
-    #[arg(long)]
     pub json: Option<PathBuf>,
 
     /// write the DMD element into the .directb2s/.b2spro file (in place)
-    #[arg(long)]
     pub write: bool,
 
-    /// do not keep a .bak copy when writing
-    #[arg(long)]
-    pub no_backup: bool,
+    /// keep a .bak copy of every file that is written
+    pub backup: bool,
 
     /// GlassRoughness value to write
-    #[arg(long, default_value_t = 0.1)]
     pub glass_roughness: f64,
 
     /// aspect ratio of the stamped rectangle: keep the hole, keep the ini
-    /// window's ratio, or derive the height from `--native-grid`. Every authored
-    /// tag on this installation is 4:1 (one 4.74), so `--native-grid 4x1`
-    /// reproduces the authoring convention
-    #[arg(long, value_enum, default_value = "hole")]
+    /// window's ratio, or derive the height from `native_grid`. Every authored
+    /// tag on a reference installation is 4:1 (one 4.74), so
+    /// `--native-grid 4x1` reproduces the authoring convention
     pub aspect: Aspect,
 
-    /// the rom's dot grid, needed by `--aspect native`: `128x32` for the WPC
+    /// the rom's dot grid, needed by `aspect: Native`: `128x32` for the WPC
     /// era, `192x64` for SAM, and `4x1` for the plain 4:1 content box the
     /// authoring tools draw. Resolving it per rom needs the rom database, which
     /// this tool does not depend on, so it stays an option.
-    #[arg(long)]
     pub native_grid: Option<Grid>,
 
-    /// the backglass monitor in desktop pixels, `x,y,w,h`: the ini window is in
+    /// the backglass monitor in desktop pixels: the ini window is in
     /// desktop pixels, the `<DMD>` tag is in backglass image pixels, and the
     /// image covers this monitor
-    #[arg(long, default_value = "2560,0,2560,2880")]
     pub backglass_monitor: Rect,
 
-    /// stop after N tables
-    #[arg(long)]
+    /// stop after N tables (folder scans)
     pub limit: Option<usize>,
 
     /// how many tables to read at a time. The work per table is decoding the
     /// embedded images and parsing 20-50 MB of XML, so more than one core pays
-    #[arg(long, default_value_t = default_jobs())]
     pub jobs: usize,
+
+    /// extra places to look for DmdDevice.ini, e.g. the configured pinmame
+    /// folder, tried before the standard locations
+    pub ini_extra: Vec<PathBuf>,
 }
 
-fn default_jobs() -> usize {
+pub fn default_jobs() -> usize {
     std::thread::available_parallelism()
         .map(std::num::NonZeroUsize::get)
         .unwrap_or(1)
@@ -162,10 +168,13 @@ pub struct Record {
 }
 
 pub fn scan(args: ScanArgs) -> Result<Vec<Record>, String> {
-    let ini_path = args.ini.clone().unwrap_or_else(default_ini);
+    let ini_path = args
+        .ini
+        .clone()
+        .unwrap_or_else(|| default_ini(&args.ini_extra));
     let ini = match DmdDeviceIni::load(&ini_path) {
         Ok(ini) => {
-            eprintln!(
+            let _ = crate::eprintln!(
                 "DmdDevice.ini: {} ({} sections)",
                 ini_path.display(),
                 ini.section_count()
@@ -173,7 +182,7 @@ pub fn scan(args: ScanArgs) -> Result<Vec<Record>, String> {
             Some(ini)
         }
         Err(e) => {
-            eprintln!("warning: {e}, ini lookups disabled");
+            let _ = crate::eprintln!("warning: {e}, ini lookups disabled");
             None
         }
     };
@@ -184,7 +193,7 @@ pub fn scan(args: ScanArgs) -> Result<Vec<Record>, String> {
             None => {
                 return Err(
                     "--aspect native needs --native-grid, e.g. `--native-grid 128x32`".into(),
-                )
+                );
             }
         },
         _ => None,
@@ -197,12 +206,37 @@ pub fn scan(args: ScanArgs) -> Result<Vec<Record>, String> {
         want_images: !args.no_hole,
     };
 
-    let tables = collect(&args.root, args.limit)?;
-    eprintln!(
-        "found {} tables under {}",
-        tables.len(),
-        args.root.display()
-    );
+    let (tables, b2s_only) = match &args.target {
+        Target::Directory(root) => {
+            let tables = collect(root, args.limit)?;
+            let _ = crate::eprintln!("found {} tables under {}", tables.len(), root.display());
+            (tables, None)
+        }
+        Target::Table(vpx) => {
+            let dir = vpx.parent().ok_or("table path without a folder")?;
+            let name = vpx.file_name().ok_or("table path without a file name")?;
+            (
+                vec![(dir.to_path_buf(), name.to_string_lossy().into_owned())],
+                None,
+            )
+        }
+        Target::B2s(b2s) => {
+            let dir = b2s.parent().ok_or("b2s path without a folder")?;
+            let stem = b2s.file_stem().ok_or("b2s path without a file name")?;
+            match find_vpx(dir, &stem.to_string_lossy()) {
+                Some(vpx) => (
+                    vec![(
+                        vpx.parent().unwrap().to_path_buf(),
+                        vpx.file_name().unwrap().to_string_lossy().into_owned(),
+                    )],
+                    None,
+                ),
+                // a backglass without a table: no rom name, no ini lookup,
+                // the hole detection works from the file alone
+                None => (Vec::new(), Some(b2s.clone())),
+            }
+        }
+    };
 
     let jobs = args.jobs.max(1);
     let started = std::time::Instant::now();
@@ -221,6 +255,9 @@ pub fn scan(args: ScanArgs) -> Result<Vec<Record>, String> {
             budget.release(cost);
             report_progress(out.len(), total);
         }
+        if let Some(b2s) = &b2s_only {
+            out.push(scan_b2s_only(b2s, &ini, policy));
+        }
         out
     } else {
         // a pool over one shared index counter, so a slow table only costs the
@@ -236,27 +273,29 @@ pub fn scan(args: ScanArgs) -> Result<Vec<Record>, String> {
                 let out = &out;
                 let tables = &tables;
                 let ini = &ini;
-                scope.spawn(move || loop {
-                    let i = next.fetch_add(1, Ordering::SeqCst);
-                    let Some((dir, vpx_name)) = tables.get(i) else {
-                        break;
-                    };
-                    let cost = estimate(dir, vpx_name);
-                    while !budget.claim(cost) {
-                        // the budget is held by bigger files, wait for one
-                        std::thread::sleep(std::time::Duration::from_millis(50));
+                scope.spawn(move || {
+                    loop {
+                        let i = next.fetch_add(1, Ordering::SeqCst);
+                        let Some((dir, vpx_name)) = tables.get(i) else {
+                            break;
+                        };
+                        let cost = estimate(dir, vpx_name);
+                        while !budget.claim(cost) {
+                            // the budget is held by bigger files, wait for one
+                            std::thread::sleep(std::time::Duration::from_millis(50));
+                        }
+                        let rec = scan_catch(dir, vpx_name, ini, policy);
+                        budget.release(cost);
+                        out.lock().unwrap().push(rec);
+                        report_progress(done.fetch_add(1, Ordering::SeqCst) + 1, total);
                     }
-                    let rec = scan_catch(dir, vpx_name, ini, policy);
-                    budget.release(cost);
-                    out.lock().unwrap().push(rec);
-                    report_progress(done.fetch_add(1, Ordering::SeqCst) + 1, total);
                 });
             }
         });
         out.into_inner()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     };
-    eprintln!(
+    let _ = crate::eprintln!(
         "{} tables in {:.0}s, peak {} MB in flight",
         records.len(),
         started.elapsed().as_secs_f64(),
@@ -264,14 +303,14 @@ pub fn scan(args: ScanArgs) -> Result<Vec<Record>, String> {
     );
     records.sort_by(|a, b| a.vpx.cmp(&b.vpx));
 
-    crate::report::print(&records);
+    report::print(&records);
     if let Some(path) = &args.json {
         let json = serde_json::to_string_pretty(&records).map_err(|e| e.to_string())?;
         fs::write(path, json).map_err(|e| format!("write {}: {e}", path.display()))?;
-        eprintln!("json written to {}", path.display());
+        let _ = crate::eprintln!("json written to {}", path.display());
     }
-    // the stamp pass: without --write it only reports the planned edits
-    let stats = stamp::stamp(&records, args.glass_roughness, args.write, !args.no_backup);
+    // the stamp pass: without `write` it only reports the planned edits
+    let stats = stamp::stamp(&records, args.glass_roughness, args.write, args.backup);
     stamp::print_stats(&stats, args.write);
     Ok(records)
 }
@@ -333,11 +372,11 @@ fn estimate(dir: &Path, vpx_name: &str) -> i64 {
     let mb = |bytes: u64| (bytes / 1_048_576).max(1) as i64;
     let stem = Path::new(vpx_name).file_stem().unwrap_or_default();
     let mut out = 8;
-    if let Some((path, _)) = find_b2s(dir, &stem.to_string_lossy()) {
-        if let Ok(len) = fs::metadata(&path).map(|m| m.len()) {
-            // bytes + String + the decoded images of one payload
-            out += mb(len) * 3;
-        }
+    if let Some((path, _)) = find_b2s(dir, &stem.to_string_lossy())
+        && let Ok(len) = fs::metadata(&path).map(|m| m.len())
+    {
+        // bytes + String + the decoded images of one payload
+        out += mb(len) * 3;
     }
     if let Ok(len) = fs::metadata(dir.join(vpx_name)).map(|m| m.len()) {
         out += mb(len) / 2;
@@ -347,7 +386,7 @@ fn estimate(dir: &Path, vpx_name: &str) -> i64 {
 
 fn report_progress(done: usize, total: usize) {
     if done.is_multiple_of(100) || done == total {
-        eprintln!("  {done}/{total} tables");
+        let _ = crate::eprintln!("  {done}/{total} tables");
     }
 }
 
@@ -402,12 +441,42 @@ fn scan_one(dir: &Path, vpx_name: &str, ini: &Option<DmdDeviceIni>, policy: Poli
         }
     };
     let Some(b2s_path) = b2s_path else { return rec };
+    analyze(&mut rec, &b2s_path, Some(&vpx), ini, policy);
+    rec
+}
 
-    let file: B2sFile = match b2s::probe(&b2s_path, policy.want_images) {
+/// One `.directb2s`/`.b2spro` with no table of a matching name: the rom name
+/// and the `DmdDevice.ini` lookup are off the table, everything else - grill,
+/// hole detection, the authored tag - works from the file alone.
+fn scan_b2s_only(b2s_path: &Path, ini: &Option<DmdDeviceIni>, policy: Policy) -> Record {
+    let mut rec = Record {
+        vpx: b2s_path.display().to_string(),
+        b2s: Some(b2s_path.display().to_string()),
+        b2s_path: Some(b2s_path.to_path_buf()),
+        match_kind: MatchKind::Exact,
+        method: policy.method,
+        aspect: policy.aspect,
+        ..Default::default()
+    };
+    rec.notes.push(
+        "no .vpx of a matching name: no rom name, the DmdDevice.ini method is unavailable".into(),
+    );
+    analyze(&mut rec, b2s_path, None, ini, policy);
+    rec
+}
+
+fn analyze(
+    rec: &mut Record,
+    b2s_path: &Path,
+    vpx: Option<&Path>,
+    ini: &Option<DmdDeviceIni>,
+    policy: Policy,
+) {
+    let file: B2sFile = match b2s::probe(b2s_path, policy.want_images) {
         Ok(f) => f,
         Err(e) => {
             rec.notes.push(format!("b2s read failed: {e}"));
-            return rec;
+            return;
         }
     };
     rec.grill_height = file.grill_height;
@@ -426,17 +495,19 @@ fn scan_one(dir: &Path, vpx_name: &str, ini: &Option<DmdDeviceIni>, policy: Poli
     }
 
     // ROM name: sidecar .vbs first, then the script embedded in the .vpx
-    match rom::game_name_from_vpx(&vpx) {
-        Ok(Some(name)) => {
-            rec.rom_source = if vpx.with_extension("vbs").exists() {
-                Some("sidecar vbs".into())
-            } else {
-                Some("embedded".into())
-            };
-            rec.rom = Some(name);
+    if let Some(vpx) = vpx {
+        match rom::game_name_from_vpx(vpx) {
+            Ok(Some(name)) => {
+                rec.rom_source = if vpx.with_extension("vbs").exists() {
+                    Some("sidecar vbs".into())
+                } else {
+                    Some("embedded".into())
+                };
+                rec.rom = Some(name);
+            }
+            Ok(None) => rec.notes.push("no cGameName in script".into()),
+            Err(e) => rec.notes.push(format!("script: {e}")),
         }
-        Ok(None) => rec.notes.push("no cGameName in script".into()),
-        Err(e) => rec.notes.push(format!("script: {e}")),
     }
 
     // DmdDevice.ini lookup
@@ -457,7 +528,7 @@ fn scan_one(dir: &Path, vpx_name: &str, ini: &Option<DmdDeviceIni>, policy: Poli
     // <DMD> tag; a hole in the grill strip (DMDImage) is recorded for diagnosis
     // and never stamped, because its coordinates belong to a different image.
     if policy.want_images {
-        if let Some(bytes) = &file.backglass_png {
+        if let Some(bytes) = file.image_bytes("BackglassImage") {
             match hole::find_holes_in_bytes(bytes, 1.0 / 3.0) {
                 Ok((cands, (w, h))) => {
                     rec.hole_scanned = true;
@@ -480,7 +551,7 @@ fn scan_one(dir: &Path, vpx_name: &str, ini: &Option<DmdDeviceIni>, policy: Poli
                 Err(e) => rec.notes.push(format!("backglass hole: {e}")),
             }
         }
-        if let Some(bytes) = &file.dmd_image_png {
+        if let Some(bytes) = file.image_bytes("DMDImage") {
             match hole::find_holes_in_bytes(bytes, 0.5) {
                 Ok((cands, _)) => rec.hole_dmd_image = cands.first().copied(),
                 Err(e) => rec.notes.push(format!("dmd image hole: {e}")),
@@ -488,10 +559,10 @@ fn scan_one(dir: &Path, vpx_name: &str, ini: &Option<DmdDeviceIni>, policy: Poli
         }
     }
 
-    if let Some((rect, source)) = pick(policy, &rec) {
+    if let Some((rect, source)) = pick(policy, rec) {
         rec.chosen = Some(rect);
         rec.source = Some(source.to_string());
-    } else if !has_grill(&rec) {
+    } else if !has_grill(rec) {
         let grill = rec.grill_height.unwrap_or(0.0);
         if grill <= 0.0 {
             if rec.hole_backglass.is_some() {
@@ -507,7 +578,7 @@ fn scan_one(dir: &Path, vpx_name: &str, ini: &Option<DmdDeviceIni>, policy: Poli
                 "grill strip is only {grill:.0} px: no DMD window, left untouched"
             ));
         }
-    } else if !has_dmd_evidence(&rec) {
+    } else if !has_dmd_evidence(rec) {
         if rec.hole_backglass.is_some() {
             rec.notes.push(
                 "flat rectangle found but no DMD evidence (no DMDImage, tag or ini section): not stamping, left untouched"
@@ -533,7 +604,6 @@ fn scan_one(dir: &Path, vpx_name: &str, ini: &Option<DmdDeviceIni>, policy: Poli
                 .push("no backglass image size: nothing to stamp, left untouched".into());
         }
     }
-    rec
 }
 
 /// A grill strip has to be a real strip. 1-5 px values do occur in the wild
@@ -628,10 +698,10 @@ fn pick(policy: Policy, rec: &Record) -> Option<(Rect, &'static str)> {
         rect = rect.with_aspect(ratio);
         // the content hangs from the top edge of the hole, so a taller box grows
         // downwards; keep it on the image
-        if let Some((_, h)) = rec.backglass_size {
-            if rect.y + rect.h > h as f64 {
-                rect.y = (h as f64 - rect.h).max(0.0);
-            }
+        if let Some((_, h)) = rec.backglass_size
+            && rect.y + rect.h > h as f64
+        {
+            rect.y = (h as f64 - rect.h).max(0.0);
         }
     }
     Some((rect, rect_and_source.1))
@@ -664,7 +734,7 @@ fn collect(root: &Path, limit: Option<usize>) -> Result<Vec<(PathBuf, String)>, 
         let entries = match fs::read_dir(&dir) {
             Ok(e) => e,
             Err(e) => {
-                eprintln!("skip {}: {e}", dir.display());
+                let _ = crate::eprintln!("skip {}: {e}", dir.display());
                 continue;
             }
         };
@@ -674,14 +744,14 @@ fn collect(root: &Path, limit: Option<usize>) -> Result<Vec<(PathBuf, String)>, 
                 stack.push(path);
                 continue;
             }
-            if path.extension().is_some_and(|e| e == "vpx") {
-                if let Some(name) = path.file_name().map(|n| n.to_string_lossy().to_string()) {
-                    out.push((dir.clone(), name));
-                    if let Some(n) = limit {
-                        if out.len() >= n {
-                            return Ok(out);
-                        }
-                    }
+            if path.extension().is_some_and(|e| e == "vpx")
+                && let Some(name) = path.file_name().map(|n| n.to_string_lossy().to_string())
+            {
+                out.push((dir.clone(), name));
+                if let Some(n) = limit
+                    && out.len() >= n
+                {
+                    return Ok(out);
                 }
             }
         }
@@ -736,6 +806,43 @@ fn find_b2s(dir: &Path, stem: &str) -> Option<(PathBuf, MatchKind)> {
     if ambiguous {
         exact.sort();
         return Some((exact.remove(0), MatchKind::Ambiguous));
+    }
+    None
+}
+
+/// The table for a backglass file: the exact stem first, then the same
+/// "up to the (Company Year)" key as [`find_b2s`], shortest name wins. This
+/// is the reverse direction of `b2s stampdmd <a .directb2s/.b2spro>`.
+fn find_vpx(dir: &Path, stem: &str) -> Option<PathBuf> {
+    let mut exact: Vec<PathBuf> = Vec::new();
+    let mut similar: Vec<(String, PathBuf)> = Vec::new();
+    let entries = fs::read_dir(dir).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file()
+            || !path
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("vpx"))
+        {
+            continue;
+        }
+        let name = path.file_stem()?.to_string_lossy().to_string();
+        if stem_eq(stem, &name) {
+            exact.push(path.clone());
+        } else if match_key(stem) == match_key(&name) {
+            similar.push((name, path.clone()));
+        }
+    }
+    if exact.len() == 1 {
+        return Some(exact.remove(0));
+    }
+    if exact.len() > 1 {
+        exact.sort();
+        return Some(exact.remove(0));
+    }
+    if !similar.is_empty() {
+        similar.sort_by(|a, b| a.0.cmp(&b.0));
+        return Some(similar.remove(0).1);
     }
     None
 }

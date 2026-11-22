@@ -12,10 +12,11 @@
 
 use std::collections::HashMap;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use crate::scan::{MatchKind, Record};
-use crate::Rect;
+use crate::b2s::Rect;
+use crate::b2s::scan::{MatchKind, Record};
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Action {
@@ -54,7 +55,11 @@ pub struct Plan {
 pub fn tag_text(rect: Rect, glass_roughness: f64) -> String {
     format!(
         "<DMD Target=\"Backglass\" X=\"{:.0}\" Y=\"{:.0}\" W=\"{:.0}\" H=\"{:.0}\" GlassRoughness=\"{}\"/>",
-        rect.x, rect.y, rect.w, rect.h, fmt_glass(glass_roughness)
+        rect.x,
+        rect.y,
+        rect.w,
+        rect.h,
+        fmt_glass(glass_roughness)
     )
 }
 
@@ -218,7 +223,7 @@ pub fn stamp(records: &[Record], glass_roughness: f64, write: bool, backup: bool
             Ok(bytes) => bytes,
             Err(e) => {
                 stats.failed += 1;
-                eprintln!("  error   {name}: read: {e}");
+                let _ = crate::eprintln!("  error   {name}: read: {e}");
                 continue;
             }
         };
@@ -229,7 +234,7 @@ pub fn stamp(records: &[Record], glass_roughness: f64, write: bool, backup: bool
                     Action::Replace => stats.replaced += 1,
                     Action::Insert => stats.inserted += 1,
                 }
-                println!(
+                let _ = crate::println!(
                     "  {:<9} {}  {} -> {}",
                     plan.action,
                     name,
@@ -243,14 +248,14 @@ pub fn stamp(records: &[Record], glass_roughness: f64, write: bool, backup: bool
                         Ok(_) => stats.written += 1,
                         Err(e) => {
                             stats.failed += 1;
-                            eprintln!("  error   {name}: {e}");
+                            let _ = crate::eprintln!("  error   {name}: {e}");
                         }
                     }
                 }
             }
             Err(e) => {
                 stats.failed += 1;
-                eprintln!("  error   {name}: {e}");
+                let _ = crate::eprintln!("  error   {name}: {e}");
             }
         }
     }
@@ -259,20 +264,20 @@ pub fn stamp(records: &[Record], glass_roughness: f64, write: bool, backup: bool
 
 pub fn print_stats(stats: &Stats, write: bool) {
     let verb = if write { "written" } else { "to write" };
-    println!("\n{}", if write { "stamped" } else { "dry run" });
-    println!("  with a rect       {}", stats.seen);
-    println!("  unchanged         {}", stats.unchanged);
-    println!("  replace tag       {}", stats.replaced);
-    println!("  insert block      {}", stats.inserted);
-    println!("  {verb:<18}{}", stats.written);
+    let _ = crate::println!("\n{}", if write { "stamped" } else { "dry run" });
+    let _ = crate::println!("  with a rect       {}", stats.seen);
+    let _ = crate::println!("  unchanged         {}", stats.unchanged);
+    let _ = crate::println!("  replace tag       {}", stats.replaced);
+    let _ = crate::println!("  insert block      {}", stats.inserted);
+    let _ = crate::println!("  {verb:<18}{}", stats.written);
     if stats.skipped > 0 {
-        println!("  no rect / no b2s  {}", stats.skipped);
+        let _ = crate::println!("  no rect / no b2s  {}", stats.skipped);
     }
     if stats.duplicate > 0 {
-        println!("  same b2s file     {}", stats.duplicate);
+        let _ = crate::println!("  same b2s file     {}", stats.duplicate);
     }
     if stats.failed > 0 {
-        println!("  failed            {}", stats.failed);
+        let _ = crate::println!("  failed            {}", stats.failed);
     }
 }
 
@@ -371,9 +376,11 @@ mod tests {
             "<DirectB2SData Version=\"1.2\">\n    <Images>\n    </Images>\n    <Displays>\n        <DMD Target=\"Backglass\" X=\"10\" Y=\"20\" W=\"120\" H=\"30\" GlassRoughness=\"0.1\"/>\n    </Displays>\n</DirectB2SData>\n"
         );
         assert_eq!(text.matches("<DMD ").count(), 1);
-        assert!(tmp_file("has.directb2s", WITH_TAG)
-            .with_file_name("has.directb2s.bak")
-            .exists());
+        assert!(
+            tmp_file("has.directb2s", WITH_TAG)
+                .with_file_name("has.directb2s.bak")
+                .exists()
+        );
     }
 
     #[test]

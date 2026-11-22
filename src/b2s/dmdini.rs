@@ -22,9 +22,9 @@ pub struct VirtualDmd {
 }
 
 impl VirtualDmd {
-    pub fn rect(&self) -> Option<crate::Rect> {
+    pub fn rect(&self) -> Option<crate::b2s::Rect> {
         match (self.left, self.top, self.width, self.height) {
-            (Some(x), Some(y), Some(w), Some(h)) => Some(crate::Rect::new(x, y, w, h)),
+            (Some(x), Some(y), Some(w), Some(h)) => Some(crate::b2s::Rect::new(x, y, w, h)),
             _ => None,
         }
     }

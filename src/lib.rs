@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 
 mod atomicwrite;
+pub mod b2s;
 mod backglass;
 pub mod capture;
 pub mod fixprint;

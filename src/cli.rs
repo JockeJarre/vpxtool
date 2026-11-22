@@ -8,7 +8,7 @@ use crate::{
 };
 use base64::Engine;
 use clap::builder::Str;
-use clap::{Arg, ArgAction, ArgMatches, Command, arg};
+use clap::{Arg, ArgAction, ArgMatches, Command, ValueHint, arg};
 use colored::Colorize;
 use console::Emoji;
 use directb2s::read;
@@ -66,6 +66,22 @@ const CMD_NEW: &str = "new";
 const CMD_LOCK: &str = "lock";
 const CMD_UNLOCK: &str = "unlock";
 const CMD_LOCK_STATUS: &str = "lock-status";
+const CMD_B2S: &str = "b2s";
+const CMD_B2S_STAMPDMD: &str = "stampdmd";
+
+const ARG_OUTPUT_DIR: &str = "OUTPUT_DIR";
+const ARG_INI: &str = "INI";
+const ARG_METHOD: &str = "METHOD";
+const ARG_ASPECT: &str = "ASPECT";
+const ARG_NATIVE_GRID: &str = "NATIVE_GRID";
+const ARG_MONITOR: &str = "MONITOR";
+const ARG_GLASS: &str = "GLASS";
+const ARG_WRITE: &str = "WRITE";
+const ARG_NO_BACKUP: &str = "NO_BACKUP";
+const ARG_NO_HOLE: &str = "NO_HOLE";
+const ARG_LIMIT: &str = "LIMIT";
+const ARG_JOBS: &str = "JOBS";
+const ARG_JSON: &str = "JSON";
 
 enum LockAction {
     Lock,
@@ -743,6 +759,7 @@ fn handle_command(matches: ArgMatches) -> io::Result<ExitCode> {
         Some((CMD_LOCK, sub_matches)) => run_lock(sub_matches, LockAction::Lock),
         Some((CMD_UNLOCK, sub_matches)) => run_lock(sub_matches, LockAction::Unlock),
         Some((CMD_LOCK_STATUS, sub_matches)) => run_lock(sub_matches, LockAction::Status),
+        Some((CMD_B2S, sub_matches)) => handle_b2s(sub_matches),
         Some((CMD_NEW, sub_matches)) => {
             let path = {
                 let this = sub_matches.get_one::<String>("VPXPATH").map(|v| v.as_str());
@@ -1584,6 +1601,142 @@ fn build_command() -> Command {
             Command::new(CMD_LOCK_STATUS)
                 .about("Show the lock state of a vpx file")
                 .arg(arg!(<VPXPATH> "The path to the vpx file").required(true)),
+        )
+        .subcommand(
+            Command::new(CMD_B2S)
+                .subcommand_required(true)
+                .about("Handle DirectB2S/B2S-Pro backglass files (.directb2s/.b2spro)")
+                .long_about(
+                    "Handles the backglass files of Visual Pinball: .directb2s (DirectB2S) and \
+                    .b2spro (B2S-Pro). Both are XML with the images stored base64-encoded and a \
+                    <DMD> element describing the DMD punch-out.",
+                )
+                .subcommand(
+                    Command::new(CMD_EXTRACT)
+                        .about("Extract the images stored in .directb2s/.b2spro files")
+                        .arg(
+                            Arg::new("PATHS")
+                                .num_args(1..)
+                                .required(true)
+                                .value_name("FILE")
+                                .value_hint(ValueHint::AnyPath)
+                                .help("The .directb2s/.b2spro files"),
+                        )
+                        .arg(
+                            Arg::new(ARG_OUTPUT_DIR)
+                                .short('o')
+                                .long("output-dir")
+                                .value_name("DIR")
+                                .value_hint(ValueHint::DirPath)
+                                .help("Output directory. Defaults to <file>.extracted beside the file for a single file, and to <stem>.extracted for several"),
+                        )
+                        .arg(
+                            Arg::new(ARG_FORCE)
+                                .short('f')
+                                .long("force")
+                                .num_args(0)
+                                .help("Do not ask for confirmation before overwriting an existing output directory"),
+                        ),
+                )
+                .subcommand(
+                    Command::new(CMD_B2S_STAMPDMD)
+                        .about("Stamp the <DMD> rectangle into .directb2s/.b2spro files")
+                        .long_about(
+                            "Writes the <DMD Target=\"Backglass\" X=\"..\" Y=\"..\" W=\"..\" \
+                            H=\"..\" GlassRoughness=\"..\"/> element into the backglass files, so \
+                            B2S renders the rom's DMD inside the grill window (the punch-out).\n\n\
+                            The rectangle is detected from the file itself: the DMD window of the \
+                            grill strip is located by hole detection on the embedded backglass \
+                            image. When no window is found, the position configured for the \
+                            table's rom (cGameName from the table script) in DmdDevice.ini is \
+                            mapped into the backglass image. The files are edited in place and \
+                            the base64 payloads are copied through untouched, so only the DMD \
+                            element changes.\n\n\
+                            Without --write this is a dry run and writes nothing.",
+                        )
+                        .arg(
+                            Arg::new("PATHS")
+                                .num_args(1)
+                                .required(true)
+                                .value_name("PATH")
+                                .value_hint(ValueHint::AnyPath)
+                                .help("A folder tree of tables, one .vpx, or one .directb2s/.b2spro"),
+                        )
+                        .arg(
+                            Arg::new(ARG_INI)
+                                .long("ini")
+                                .value_name("FILE")
+                                .value_hint(ValueHint::FilePath)
+                                .help("Path of DmdDevice.ini. Defaults to ~/.pinmame/DmdDevice.ini, %APPDATA%\\Visual Pinball\\DmdDevice.ini and the pinmame folder from the vpxtool config"),
+                        )
+                        .arg(
+                            Arg::new(ARG_METHOD)
+                                .long("method")
+                                .value_name("METHOD")
+                                .help("hole (default): detect the window, fall back to ini | ini: ini only | auto: take the authored tag first | template: synthesize a 4:1 window"),
+                        )
+                        .arg(
+                            Arg::new(ARG_ASPECT)
+                                .long("aspect")
+                                .value_name("ASPECT")
+                                .help("hole (default): keep the detected box | ini: the ini window's ratio | native: derive the height from --native-grid"),
+                        )
+                        .arg(
+                            Arg::new(ARG_NATIVE_GRID)
+                                .long("native-grid")
+                                .value_name("WxH")
+                                .help("The rom's dot grid for --aspect native, e.g. 128x32"),
+                        )
+                        .arg(
+                            Arg::new(ARG_MONITOR)
+                                .long("monitor")
+                                .value_name("X,Y,W,H")
+                                .help("The backglass monitor in desktop pixels (default 2560,0,2560,2880)"),
+                        )
+                        .arg(
+                            Arg::new(ARG_GLASS)
+                                .long("glass")
+                                .value_name("VALUE")
+                                .help("GlassRoughness value to write (default 0.1)"),
+                        )
+                        .arg(
+                            Arg::new(ARG_WRITE)
+                                .long("write")
+                                .num_args(0)
+                                .help("Write the files. Without this flag nothing is written (dry run)"),
+                        )
+                        .arg(
+                            Arg::new(ARG_NO_BACKUP)
+                                .long("no-backup")
+                                .num_args(0)
+                                .help("Do not keep a .bak copy of every file that is written"),
+                        )
+                        .arg(
+                            Arg::new(ARG_NO_HOLE)
+                                .long("no-hole")
+                                .num_args(0)
+                                .help("Skip hole detection: ini lookups only, much faster"),
+                        )
+                        .arg(
+                            Arg::new(ARG_LIMIT)
+                                .long("limit")
+                                .value_name("N")
+                                .help("Stop after N tables"),
+                        )
+                        .arg(
+                            Arg::new(ARG_JOBS)
+                                .long("jobs")
+                                .value_name("N")
+                                .help("Tables read in parallel (default: number of cores)"),
+                        )
+                        .arg(
+                            Arg::new(ARG_JSON)
+                                .long("json")
+                                .value_name("FILE")
+                                .value_hint(ValueHint::FilePath)
+                                .help("Also write the collected data as JSON for analysis"),
+                        ),
+                ),
         )
         .subcommand(
             Command::new(CMD_CONVERT)
@@ -3944,4 +4097,200 @@ fn verify_file(path: &str, with_sha: bool) -> VerifyReport {
             error: Some(e.to_string()),
         },
     }
+}
+
+fn handle_b2s(sub_matches: &ArgMatches) -> io::Result<ExitCode> {
+    match sub_matches.subcommand() {
+        Some((CMD_EXTRACT, sub_matches)) => handle_b2s_extract(sub_matches),
+        Some((CMD_B2S_STAMPDMD, sub_matches)) => handle_b2s_stampdmd(sub_matches),
+        _ => unreachable!(),
+    }
+}
+
+fn is_b2s_file(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("directb2s") || e.eq_ignore_ascii_case("b2spro"))
+}
+
+fn handle_b2s_extract(sub_matches: &ArgMatches) -> io::Result<ExitCode> {
+    let paths: Vec<PathBuf> = sub_matches
+        .get_many::<String>("PATHS")
+        .map(|values| values.map(path_exists).collect::<io::Result<_>>())
+        .transpose()?
+        .unwrap_or_default();
+    for path in &paths {
+        if !is_b2s_file(path) {
+            return Err(io::Error::other(format!(
+                "{}: not a .directb2s/.b2spro file",
+                path.display()
+            )));
+        }
+    }
+    let force = sub_matches.get_flag(ARG_FORCE);
+    let out_flag = sub_matches
+        .get_one::<String>(ARG_OUTPUT_DIR)
+        .map(PathBuf::from);
+
+    for path in &paths {
+        // one file goes to <file>.extracted, several files each to their own
+        // folder under the output directory, like the vpx extract command
+        let default_dir = path.with_extension(format!(
+            "{}.extracted",
+            path.extension()
+                .map(|e| e.to_string_lossy().to_lowercase())
+                .unwrap_or_else(|| "b2s".into())
+        ));
+        let out_dir = match &out_flag {
+            Some(dir) if paths.len() == 1 => dir.clone(),
+            Some(dir) => dir.join(
+                path.file_stem()
+                    .map(|s| s.to_os_string())
+                    .unwrap_or_default(),
+            ),
+            None => default_dir,
+        };
+        if !force && std::fs::metadata(&out_dir).is_ok_and(|m| m.is_dir()) {
+            let not_empty = std::fs::read_dir(&out_dir)
+                .map(|mut d| d.next().is_some())
+                .unwrap_or(false);
+            if not_empty {
+                let confirmed = confirm(
+                    format!("Output folder \"{}\" is not empty", out_dir.display()),
+                    "Do you want to overwrite its content?".to_string(),
+                )?;
+                if !confirmed {
+                    crate::println!("Skipping {}", path.display())?;
+                    continue;
+                }
+            }
+        }
+        let outcome = crate::b2s::extract::extract(path, &out_dir).map_err(io::Error::other)?;
+        crate::println!("Writing to {}", out_dir.display())?;
+        for written in &outcome.written {
+            crate::println!(
+                "  {} -> {} ({:.1} MB)",
+                written.element,
+                written.path.display(),
+                written.bytes as f64 / (1024.0 * 1024.0)
+            )?;
+        }
+        for skipped in &outcome.skipped {
+            crate::println!(
+                "  [NOTE] {}: {} skipped: {}",
+                path.display(),
+                skipped.element,
+                skipped.reason
+            )?;
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn handle_b2s_stampdmd(sub_matches: &ArgMatches) -> io::Result<ExitCode> {
+    let path = sub_matches
+        .get_one::<String>("PATHS")
+        .map(PathBuf::from)
+        .expect("PATHS is required");
+    let path = path_exists(&path)?;
+    let target = if path.is_dir() {
+        crate::b2s::scan::Target::Directory(path)
+    } else if path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("vpx"))
+    {
+        crate::b2s::scan::Target::Table(path)
+    } else if is_b2s_file(&path) {
+        crate::b2s::scan::Target::B2s(path)
+    } else {
+        return Err(io::Error::other(format!(
+            "{}: expected a folder, a .vpx, a .directb2s or a .b2spro",
+            path.display()
+        )));
+    };
+
+    let method = match sub_matches
+        .get_one::<String>(ARG_METHOD)
+        .map(String::as_str)
+        .unwrap_or("hole")
+    {
+        "hole" => crate::b2s::Method::Hole,
+        "ini" => crate::b2s::Method::Ini,
+        "auto" => crate::b2s::Method::Auto,
+        "template" => crate::b2s::Method::Template,
+        other => {
+            return Err(io::Error::other(format!(
+                "--method {other}: use hole, ini, auto or template"
+            )));
+        }
+    };
+    let aspect = match sub_matches
+        .get_one::<String>(ARG_ASPECT)
+        .map(String::as_str)
+        .unwrap_or("hole")
+    {
+        "hole" => crate::b2s::Aspect::Hole,
+        "ini" => crate::b2s::Aspect::Ini,
+        "native" => crate::b2s::Aspect::Native,
+        other => {
+            return Err(io::Error::other(format!(
+                "--aspect {other}: use hole, ini or native"
+            )));
+        }
+    };
+    let native_grid = sub_matches
+        .get_one::<String>(ARG_NATIVE_GRID)
+        .map(|s| s.parse::<crate::b2s::Grid>())
+        .transpose()
+        .map_err(io::Error::other)?;
+    let backglass_monitor = sub_matches
+        .get_one::<String>(ARG_MONITOR)
+        .map(|s| s.parse::<crate::b2s::Rect>())
+        .transpose()
+        .map_err(io::Error::other)?
+        .unwrap_or_else(|| crate::b2s::Rect::new(2560.0, 0.0, 2560.0, 2880.0));
+    let glass_roughness = sub_matches
+        .get_one::<String>(ARG_GLASS)
+        .map(|s| {
+            s.parse::<f64>()
+                .map_err(|_| io::Error::other(format!("--glass: not a number: {s}")))
+        })
+        .transpose()?;
+
+    // the configured pinmame folder is a candidate for DmdDevice.ini too
+    let mut ini_extra = Vec::new();
+    if let Ok(Some((_, config))) = crate::config::load_config() {
+        ini_extra.push(config.configured_pinmame_folder().unwrap_or_default());
+    }
+
+    let args = crate::b2s::scan::ScanArgs {
+        target,
+        ini: sub_matches.get_one::<String>(ARG_INI).map(PathBuf::from),
+        method,
+        no_hole: sub_matches.get_flag(ARG_NO_HOLE),
+        json: sub_matches.get_one::<String>(ARG_JSON).map(PathBuf::from),
+        write: sub_matches.get_flag(ARG_WRITE),
+        backup: !sub_matches.get_flag(ARG_NO_BACKUP),
+        glass_roughness: glass_roughness.unwrap_or(0.1),
+        aspect,
+        native_grid,
+        backglass_monitor,
+        limit: sub_matches
+            .get_one::<String>(ARG_LIMIT)
+            .map(|s| {
+                s.parse::<usize>()
+                    .map_err(|_| io::Error::other(format!("--limit: not a number: {s}")))
+            })
+            .transpose()?,
+        jobs: sub_matches
+            .get_one::<String>(ARG_JOBS)
+            .map(|s| {
+                s.parse::<usize>()
+                    .map_err(|_| io::Error::other(format!("--jobs: not a number: {s}")))
+            })
+            .transpose()?
+            .unwrap_or_else(crate::b2s::scan::default_jobs),
+        ini_extra,
+    };
+    crate::b2s::scan::scan(args).map_err(io::Error::other)?;
+    Ok(ExitCode::SUCCESS)
 }

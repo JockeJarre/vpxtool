@@ -12,7 +12,7 @@ use base64::Engine as _;
 use quick_xml::events::Event;
 use quick_xml::{Reader, XmlVersion};
 
-use crate::Rect;
+use crate::b2s::Rect;
 
 #[derive(Clone, Copy, PartialEq, Debug, Default)]
 pub struct Size {
@@ -47,6 +47,21 @@ pub struct ImageInfo {
     pub base64_len: usize,
 }
 
+/// One image element inside `<Images>`: the element name (`BackglassImage`,
+/// `DMDImage`, `ThumbnailImage`, ...), the designer's source file name, and
+/// the payload decoded from base64 when `want_images` was set.
+#[derive(Debug)]
+pub struct B2sImage {
+    pub element: String,
+    pub source_file_name: Option<String>,
+    /// length of the base64 payload, a cheap way to tell a stub image from a real one
+    pub base64_len: usize,
+    pub size: Option<Size>,
+    /// decoded image bytes, only present when `want_images` was set and the
+    /// payload decoded; `None` for an empty or corrupt base64 value
+    pub bytes: Option<Vec<u8>>,
+}
+
 #[derive(Debug, Default)]
 pub struct B2sFile {
     /// the file this was read from, for the message of a read error
@@ -60,9 +75,19 @@ pub struct B2sFile {
     pub dmd: Option<DmdTag>,
     pub backglass_image: Option<ImageInfo>,
     pub dmd_image: Option<ImageInfo>,
-    /// decoded image bytes, only present when `want_images` was set
-    pub backglass_png: Option<Vec<u8>>,
-    pub dmd_image_png: Option<Vec<u8>>,
+    /// every `<Images>` child, in document order, for the extract command
+    pub images: Vec<B2sImage>,
+}
+
+impl B2sFile {
+    /// The decoded payload of the first `<Images>` child with this element
+    /// name (`BackglassImage`, `DMDImage`, ...), when `want_images` was set.
+    pub fn image_bytes(&self, element: &str) -> Option<&[u8]> {
+        self.images
+            .iter()
+            .find(|i| i.element == element)
+            .and_then(|i| i.bytes.as_deref())
+    }
 }
 
 type Attrs = Vec<(String, String)>;
@@ -152,30 +177,38 @@ fn handle(out: &mut B2sFile, stack: &[String], name: &str, attrs: &Attrs, want_i
                 glass_roughness: attr(attrs, "GlassRoughness").and_then(parse_f64),
             });
         }
-        "BackglassImage" | "DMDImage" => {
-            let value = attr(attrs, "Value").unwrap_or("");
-            let mut info = ImageInfo {
-                source_file_name: attr(attrs, "FileName").map(String::from),
-                size: None,
-                base64_len: value.len(),
-            };
-            if let Ok(bytes) = decode_image(value) {
-                info.size = image_size(&bytes);
-                if want_images {
-                    if name == "BackglassImage" {
-                        out.backglass_png = Some(bytes)
-                    } else {
-                        out.dmd_image_png = Some(bytes)
-                    }
-                }
-            }
-            if name == "BackglassImage" {
-                out.backglass_image = Some(info)
-            } else {
-                out.dmd_image = Some(info)
+        _ => {}
+    }
+    // every image element inside <Images>: the payloads are base64 in the
+    // `Value` attribute. Decoded once; the dedicated backglass/dmd fields
+    // take the bytes out of the entry so nothing is decoded twice.
+    if stack.last().map(|s| s == "Images").unwrap_or(false)
+        && let Some(value) = attr(attrs, "Value")
+    {
+        let mut img = B2sImage {
+            element: name.to_string(),
+            source_file_name: attr(attrs, "FileName").map(String::from),
+            base64_len: value.len(),
+            size: None,
+            bytes: None,
+        };
+        if let Ok(bytes) = decode_image(value) {
+            img.size = image_size(&bytes);
+            if want_images {
+                img.bytes = Some(bytes);
             }
         }
-        _ => {}
+        let info = ImageInfo {
+            source_file_name: img.source_file_name.clone(),
+            size: img.size,
+            base64_len: img.base64_len,
+        };
+        match name {
+            "BackglassImage" => out.backglass_image = Some(info),
+            "DMDImage" => out.dmd_image = Some(info),
+            _ => {}
+        }
+        out.images.push(img);
     }
 }
 
@@ -241,4 +274,24 @@ pub fn image_size(bytes: &[u8]) -> Option<Size> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod decode_tests {
+    use super::decode_image;
+    #[test]
+    fn payload_survives_the_attribute_roundtrip() {
+        let xml = "<DirectB2SData><Images><BackglassImage Value=\"QUJD\r\nRA==\"/></Images></DirectB2SData>";
+        let path = std::env::temp_dir().join("vpxtool-xml-roundtrip.directb2s");
+        std::fs::write(&path, xml).unwrap();
+        let f = crate::b2s::xml::probe(&path, true).unwrap();
+        assert_eq!(f.images.len(), 1);
+        assert_eq!(f.images[0].bytes.as_deref(), Some(&b"ABCD"[..]));
+    }
+
+    #[test]
+    fn crlf_inside_the_payload_is_stripped() {
+        let ok = decode_image("QUJD\r\nRA=="); // "ABCD"
+        assert_eq!(ok.as_deref(), Ok(&b"ABCD"[..]));
+    }
 }
