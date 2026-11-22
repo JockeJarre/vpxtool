@@ -1,0 +1,76 @@
+name: Branch build
+
+on:
+  push:
+    branches:
+      - B2Shandling
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Release - ${{ matrix.platform.os_name }}
+    strategy:
+      matrix:
+        platform:
+          - os_name: linux-x86_64
+            os: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+            bin: vpxtool
+            name: vpxtool-linux-x86_64
+
+          - os_name: windows-x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            bin: vpxtool.exe
+            name: vpxtool-windows-x86_64
+
+    runs-on: ${{ matrix.platform.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Install minimal stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          target: ${{ matrix.platform.target }}
+      - uses: Swatinem/rust-cache@v2.9.3
+      - name: Build binary (*nix)
+        shell: bash
+        run: |
+          cargo build --locked --release --target ${{ matrix.platform.target }}
+        if: ${{ !contains(matrix.platform.os, 'windows') }}
+      - name: Build binary (Windows)
+        # We have to use the platform's native shell. If we use bash on
+        # Windows then OpenSSL complains that the Perl it finds doesn't use
+        # the platform's native paths and refuses to build.
+        shell: powershell
+        run: |
+          & cargo build --locked --release --target ${{ matrix.platform.target }}
+        if: contains(matrix.platform.os, 'windows')
+      - name: Set archive name
+        shell: bash
+        run: |
+          VERSION=$(git rev-parse --short $GITHUB_SHA)
+          EXTENSION="tar.gz"
+          if [[ "${{ matrix.platform.os }}" == "windows-latest" ]]; then
+            EXTENSION="zip"
+          fi
+          echo "ARCHIVE_NAME=${{ matrix.platform.name }}-${VERSION}.$EXTENSION" >> $GITHUB_ENV
+      - name: Package as archive
+        shell: bash
+        run: |
+          cd target/${{ matrix.platform.target }}/release
+          if [[ "${{ matrix.platform.os }}" == "windows-latest" ]]; then
+            7z a ../../../$ARCHIVE_NAME ${{ matrix.platform.bin }}
+          else
+            tar czvf ../../../$ARCHIVE_NAME ${{ matrix.platform.bin }}
+          fi
+          cd -
+      - name: Publish build artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.ARCHIVE_NAME }}
+          path: ${{ env.ARCHIVE_NAME }}
+          if-no-files-found: error
