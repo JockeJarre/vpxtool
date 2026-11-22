@@ -551,7 +551,7 @@ fn analyze(
                         )),
                         Some(found) => {
                             rec.hole_backglass = Some(found);
-                            if grill > 0.0 && hole::pick_in_grill(&[found], h, grill).is_none() {
+                            if grill > 0.0 && hole::pick_in_grill(&[found], h, grill).is_empty() {
                                 rec.notes
                                     .push("backglass hole is outside the grill band".to_string());
                             }

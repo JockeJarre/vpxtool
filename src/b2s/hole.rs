@@ -55,13 +55,27 @@ pub fn find_holes(img: &RgbaImage, divisions: u32, min_width: f64) -> Vec<Rect> 
             let y2 = ((gy + 1) as f64 / divisions as f64) * ih as f64;
             let cx = (((x1 + x2) / 2.0) as u32).min(iw - 1);
             let cy = (((y1 + y2) / 2.0) as u32).min(ih - 1);
-            let hole = find_hole_from(img, cx, cy, MAX_DEVIATION_U8);
-            if hole.w < min_width || !(MIN_TRACE_ASPECT..=MAX_TRACE_ASPECT).contains(&hole.aspect())
-            {
-                continue;
-            }
-            if !found.contains(&hole) {
-                found.push(hole);
+            // both a strict and a dark-extended rectangle from each seed:
+            // the strict one is the window core, the relaxed one reaches the
+            // bevel through the window's photo gradient - on files whose
+            // surround is a flat dark panel the relaxed one eats the panel,
+            // and the template ranking then prefers the core
+            for dark in [false, true] {
+                let hole = find_hole_from(img, cx, cy, MAX_DEVIATION_U8, dark);
+                if hole.w < min_width
+                    || !(MIN_TRACE_ASPECT..=MAX_TRACE_ASPECT).contains(&hole.aspect())
+                {
+                    continue;
+                }
+                // the dark-room pass also traces smooth dark *art* - the
+                // night sky, a cityscape - so a candidate must carry a
+                // genuinely flat core
+                if strict_coverage(img, &hole) < 0.25 {
+                    continue;
+                }
+                if !found.contains(&hole) {
+                    found.push(hole);
+                }
             }
         }
     }
@@ -70,15 +84,16 @@ pub fn find_holes(img: &RgbaImage, divisions: u32, min_width: f64) -> Vec<Rect> 
     found
 }
 
-/// The uniform-colour rectangle around `(cx, cy)`.
-pub fn find_hole_from(img: &RgbaImage, cx: u32, cy: u32, deviation: u8) -> Rect {
+/// The uniform-colour rectangle around `(cx, cy)`. With `dark` the traces
+/// follow neutral dark gradients (see [`within_tol`]).
+pub fn find_hole_from(img: &RgbaImage, cx: u32, cy: u32, deviation: u8, dark: bool) -> Rect {
     let (iw, ih) = (img.width(), img.height());
     let center = *img.get_pixel(cx, cy);
 
     let mut left = cx;
     while left > 0 {
         left -= 1;
-        if !within(img.get_pixel(left, cy), &center, deviation) {
+        if !inside(img.get_pixel(left, cy), &center, deviation, dark) {
             left += 1;
             break;
         }
@@ -86,7 +101,7 @@ pub fn find_hole_from(img: &RgbaImage, cx: u32, cy: u32, deviation: u8) -> Rect 
     let mut right = cx;
     while right < iw - 1 {
         right += 1;
-        if !within(img.get_pixel(right, cy), &center, deviation) {
+        if !inside(img.get_pixel(right, cy), &center, deviation, dark) {
             right -= 1;
             break;
         }
@@ -94,7 +109,7 @@ pub fn find_hole_from(img: &RgbaImage, cx: u32, cy: u32, deviation: u8) -> Rect 
     let mut top = cy;
     while top > 0 {
         top -= 1;
-        if !within(img.get_pixel(cx, top), &center, deviation) {
+        if !inside(img.get_pixel(cx, top), &center, deviation, dark) {
             top += 1;
             break;
         }
@@ -102,7 +117,7 @@ pub fn find_hole_from(img: &RgbaImage, cx: u32, cy: u32, deviation: u8) -> Rect 
     let mut bottom = cy;
     while bottom < ih - 1 {
         bottom += 1;
-        if !within(img.get_pixel(cx, bottom), &center, deviation) {
+        if !inside(img.get_pixel(cx, bottom), &center, deviation, dark) {
             bottom -= 1;
             break;
         }
@@ -110,10 +125,10 @@ pub fn find_hole_from(img: &RgbaImage, cx: u32, cy: u32, deviation: u8) -> Rect 
 
     // Trace to the corners as well, to shrink away rounded / filleted corners.
     let center_point = (cx, cy);
-    let tl = trace(img, center_point, (left, top), &center, deviation);
-    let tr = trace(img, center_point, (right, top), &center, deviation);
-    let bl = trace(img, center_point, (left, bottom), &center, deviation);
-    let br = trace(img, center_point, (right, bottom), &center, deviation);
+    let tl = trace(img, center_point, (left, top), &center, deviation, dark);
+    let tr = trace(img, center_point, (right, top), &center, deviation, dark);
+    let bl = trace(img, center_point, (left, bottom), &center, deviation, dark);
+    let br = trace(img, center_point, (right, bottom), &center, deviation, dark);
 
     let left = tl.0.max(bl.0);
     let right = tr.0.min(br.0);
@@ -133,15 +148,24 @@ fn trace(
     to: (u32, u32),
     color: &Rgba<u8>,
     deviation: u8,
+    dark: bool,
 ) -> (u32, u32) {
     let mut current = to;
     for (x, y) in LineIter::new(from, to) {
-        if !within(img.get_pixel(x, y), color, deviation) {
+        if !inside(img.get_pixel(x, y), color, deviation, dark) {
             break;
         }
         current = (x, y);
     }
     current
+}
+
+fn inside(a: &Rgba<u8>, b: &Rgba<u8>, max_deviation: u8, dark: bool) -> bool {
+    if dark {
+        within_tol(a, b, max_deviation)
+    } else {
+        within(a, b, max_deviation)
+    }
 }
 
 fn within(a: &Rgba<u8>, b: &Rgba<u8>, max_deviation: u8) -> bool {
@@ -151,6 +175,44 @@ fn within(a: &Rgba<u8>, b: &Rgba<u8>, max_deviation: u8) -> bool {
             .map(|(x, y)| x.abs_diff(*y) as u32)
             .sum();
     total <= max_deviation as u32 * 4
+}
+
+/// A seed under this brightness is a near-black cut-out. The cut-outs are
+/// painted near black (2-10) and their photo content - vignette, light leak,
+/// reflections - is a neutral gradient up to ~45 per channel.
+const DARK_SEED_LUMA: u32 = 30;
+const DARK_MAX_DIFF: u32 = 45;
+const DARK_SPREAD: u32 = 12;
+
+/// [`within`] plus the dark-room pass: from a near-black seed, an equally
+/// coloured pixel up to 45 levels brighter is still inside the window.
+/// A painted DMD window is not flat black but a photo: a vignette, a light
+/// leak, panel reflections, all of them gradients of 20-40 per channel that
+/// the deviation of 5 cuts after a few pixels - the corner traces stop
+/// inside the window and the rectangle collapses under the aspect filter.
+/// The pass only accepts *neutral* growth, all three channels rising
+/// together: the dark red shadows under a bevel raise red by 56 while green
+/// and blue stay at 6, and are a wall; the bright bevels fail on the
+/// difference alone.
+fn within_tol(a: &Rgba<u8>, b: &Rgba<u8>, max_deviation: u8) -> bool {
+    if within(a, b, max_deviation) {
+        return true;
+    }
+    if luma(b) >= DARK_SEED_LUMA {
+        return false;
+    }
+    let d = [
+        a[0].abs_diff(b[0]) as u32,
+        a[1].abs_diff(b[1]) as u32,
+        a[2].abs_diff(b[2]) as u32,
+    ];
+    let mx = d[0].max(d[1]).max(d[2]);
+    let mn = d[0].min(d[1]).min(d[2]);
+    mx <= DARK_MAX_DIFF && mx - mn <= DARK_SPREAD
+}
+
+fn luma(p: &Rgba<u8>) -> u32 {
+    (p[0] as u32 + p[1] as u32 + p[2] as u32) / 3
 }
 
 struct LineIter {
@@ -230,12 +292,46 @@ pub fn find_holes_in_bytes(
 /// backglass image: at least 60 % of its height must be inside
 /// `[image_h - grill, image_h]`. This is what keeps a flat-coloured area of the
 /// playfield art from being mistaken for the DMD cut-out.
-pub fn pick_in_grill(candidates: &[Rect], image_h: u32, grill: f64) -> Option<Rect> {
+pub fn pick_in_grill(candidates: &[Rect], image_h: u32, grill: f64) -> Vec<Rect> {
     let top = image_h as f64 - grill;
-    candidates.iter().copied().find(|r| {
-        let inside = (r.y + r.h).min(image_h as f64) - r.y.max(top);
-        inside > 0.6 * r.h
-    })
+    candidates
+        .iter()
+        .copied()
+        .filter(|r| {
+            let inside = (r.y + r.h).min(image_h as f64) - r.y.max(top);
+            inside > 0.6 * r.h
+        })
+        .collect()
+}
+
+/// The fraction of the rectangle that is flat to the strict deviation, seen
+/// from its centre pixel. A painted window is flat black at the centre and
+/// fades out in its photo content, so a real cut-out keeps a wide strict
+/// core; dark art passes the dark-room pass but is never flat over
+/// hundreds of pixels.
+fn strict_coverage(img: &RgbaImage, r: &Rect) -> f64 {
+    let cx = (r.x + r.w / 2.0) as u32;
+    let cy = (r.y + r.h / 2.0) as u32;
+    let center = *img.get_pixel(cx.min(img.width() - 1), cy.min(img.height() - 1));
+    let step = ((r.w / 80.0) as u32).clamp(2, 16);
+    let (mut seen, mut flat) = (0u64, 0u64);
+    let mut y = r.y as u32;
+    while y < (r.y + r.h) as u32 {
+        let mut x = r.x as u32;
+        while x < (r.x + r.w) as u32 {
+            seen += 1;
+            if within(img.get_pixel(x, y), &center, MAX_DEVIATION_U8) {
+                flat += 1;
+            }
+            x += step;
+        }
+        y += step;
+    }
+    if seen == 0 {
+        0.0
+    } else {
+        flat as f64 / seen as f64
+    }
 }
 
 /// Where the authoring tools put the DMD box, as fractions of the backglass
@@ -280,6 +376,11 @@ pub fn is_plausible(r: Rect, image_w: u32, image_h: u32) -> bool {
         && (0.25..=0.90).contains(&wf)
         && xf <= 0.60
         && (0.45..=1.0).contains(&yf)
+        // the window sits inside the grill panel, it is never flush with the
+        // image edge - a trace that runs to the edge leaked through a flat
+        // dark panel of the same colour as the cut-out and stamped it whole
+        && r.x >= 0.02 * w
+        && r.x + r.w <= 0.98 * w
 }
 
 /// The hole to stamp, out of the candidates of one backglass image.
@@ -298,9 +399,11 @@ pub fn pick_hole(candidates: &[Rect], image_w: u32, image_h: u32, grill: f64) ->
         return None;
     }
     let pool = if grill > 0.0 {
-        match pick_in_grill(&plausible, image_h, grill) {
-            Some(in_band) => vec![in_band],
-            None => plausible,
+        let in_band = pick_in_grill(&plausible, image_h, grill);
+        if in_band.is_empty() {
+            plausible
+        } else {
+            in_band
         }
     } else {
         plausible
@@ -371,7 +474,7 @@ mod tests {
         square(&mut img, 80, 150, 160, 40, Rgba([9, 9, 9, 255]));
         let cands = find_holes(&img, 8, 320.0 / 3.0);
         assert_eq!(cands.len(), 2);
-        let picked = pick_in_grill(&cands, 200, 60.0).unwrap();
+        let picked = pick_in_grill(&cands, 200, 60.0).into_iter().next().unwrap();
         assert_eq!((picked.x as u32, picked.y as u32), (80, 150));
     }
 
@@ -473,5 +576,31 @@ mod tests {
             r.aspect()
         );
         assert!(is_plausible(r, 2000, 1565), "the template itself must pass");
+    }
+
+    #[test]
+    fn a_dark_window_with_a_gradient_is_traced_whole() {
+        // 300x120 image: bright background, bevel ring, interior that is dark
+        // but not flat (a horizontal gradient of 4..40 per channel)
+        let mut img = RgbaImage::from_pixel(300, 120, Rgba([200, 200, 200, 255]));
+        for y in 20..100 {
+            for x in 40..260 {
+                img.put_pixel(x, y, Rgba([180, 180, 180, 255])); // bright metal bevel
+            }
+        }
+        for y in 26..94 {
+            for x in 46..254 {
+                let v = (4 + (x - 46) * 36 / 208) as u8;
+                img.put_pixel(x, y, Rgba([v, v, v, 255]));
+            }
+        }
+        let hole = find_hole_from(&img, 150, 60, MAX_DEVIATION_U8, true);
+        assert!(
+            (hole.x - 46.0).abs() < 2.0
+                && (hole.y - 26.0).abs() < 2.0
+                && (hole.w - 208.0).abs() < 3.0
+                && (hole.h - 68.0).abs() < 3.0,
+            "{hole:?}"
+        );
     }
 }
