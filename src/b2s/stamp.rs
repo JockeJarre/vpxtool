@@ -178,13 +178,24 @@ pub struct Stats {
     pub inserted: usize,
     pub written: usize,
     pub skipped: usize,
+    /// files left alone because they already carry a `<DMD>` tag
+    pub existing: usize,
     pub duplicate: usize,
     pub failed: usize,
 }
 
 /// Plans (and with `write`, applies) the stamp for every record that has a
-/// rectangle. A plan that fails does not stop the run.
-pub fn stamp(records: &[Record], glass_roughness: f64, write: bool, backup: bool) -> Stats {
+/// rectangle. A file that already carries a `<DMD>` tag is
+/// the marker of a finished backglass - authored by a B2S editor or stamped
+/// by an earlier run - and is left alone unless `force` asks to overwrite it.
+/// A plan that fails does not stop the run.
+pub fn stamp(
+    records: &[Record],
+    glass_roughness: f64,
+    write: bool,
+    backup: bool,
+    force: bool,
+) -> Stats {
     let mut stats = Stats::default();
     // several tables can match the same backglass file; stamp each file once,
     // and let an exact name match win over a similar one
@@ -219,6 +230,12 @@ pub fn stamp(records: &[Record], glass_roughness: f64, write: bool, backup: bool
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| path.display().to_string());
+        if rec.existing_dmd.is_some() && !force {
+            stats.existing += 1;
+            let _ =
+                crate::println!("  skip      {name}  existing <DMD> tag, use --force to overwrite");
+            continue;
+        }
         let bytes = match fs::read(path) {
             Ok(bytes) => bytes,
             Err(e) => {
@@ -270,6 +287,10 @@ pub fn print_stats(stats: &Stats, write: bool) {
     let _ = crate::println!("  replace tag       {}", stats.replaced);
     let _ = crate::println!("  insert block      {}", stats.inserted);
     let _ = crate::println!("  {verb:<18}{}", stats.written);
+    if stats.existing > 0 {
+        let verb = if write { "left" } else { "skip" };
+        let _ = crate::println!("  existing tag {verb:5}{}", stats.existing);
+    }
     if stats.skipped > 0 {
         let _ = crate::println!("  no rect / no b2s  {}", stats.skipped);
     }
@@ -477,6 +498,32 @@ mod tests {
     }
 
     #[test]
+    fn an_existing_tag_is_left_alone_unless_forced() {
+        let path = tmp_file("marker.directb2s", WITH_TAG);
+        let bytes = fs::read(&path).unwrap();
+        let rec = Record {
+            vpx: "a.vpx".into(),
+            b2s_path: Some(path.clone()),
+            match_kind: MatchKind::Exact,
+            existing_dmd: Some(Rect::new(484.0, 1240.0, 1034.0, 218.0)),
+            chosen: Some(target()),
+            ..Default::default()
+        };
+        let recs = [rec];
+        // the tag is the marker of a finished backglass: a rescan skips it
+        let stats = stamp(&recs, 0.1, true, false, false);
+        assert_eq!(stats.existing, 1);
+        assert_eq!(stats.replaced, 0);
+        assert_eq!(stats.written, 0);
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        // --force overwrites it
+        let stats = stamp(&recs, 0.1, true, false, true);
+        assert_eq!(stats.replaced, 1);
+        assert_eq!(stats.written, 1);
+        assert_ne!(fs::read(&path).unwrap(), bytes);
+    }
+
+    #[test]
     fn an_existing_backup_is_not_overwritten() {
         let path = tmp_file("keepbak.directb2s", WITH_TAG);
         let bak = path.with_file_name("keepbak.directb2s.bak");
@@ -508,7 +555,7 @@ mod tests {
             chosen: Some(rect),
             ..Default::default()
         };
-        let stats = stamp(&[first, second], 0.1, true, false);
+        let stats = stamp(&[first, second], 0.1, true, false, false);
         assert_eq!(stats.seen, 1);
         assert_eq!(stats.duplicate, 1);
         assert_eq!(stats.written, 1);

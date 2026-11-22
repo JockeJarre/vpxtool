@@ -1652,7 +1652,10 @@ fn build_command() -> Command {
                             mapped into the backglass image. The files are edited in place and \
                             the base64 payloads are copied through untouched, so only the DMD \
                             element changes.\n\n\
-                            Without --write this is a dry run and writes nothing.",
+                            Without --write this is a dry run and writes nothing.\n\
+                            A file that already carries a <DMD> tag is the marker of a \
+                            finished backglass, authored by a B2S editor or stamped by an \
+                            earlier run, and is left alone; --force overwrites it.",
                         )
                         .arg(
                             Arg::new("PATHS")
@@ -1710,6 +1713,13 @@ fn build_command() -> Command {
                                 .long("no-backup")
                                 .num_args(0)
                                 .help("Do not keep a .bak copy of every file that is written"),
+                        )
+                        .arg(
+                            Arg::new(ARG_FORCE)
+                                .short('f')
+                                .long("force")
+                                .num_args(0)
+                                .help("Overwrite files that already carry a <DMD> tag. Without this flag those files are left alone, the tag being the marker of a finished backglass"),
                         )
                         .arg(
                             Arg::new(ARG_NO_HOLE)
@@ -4270,6 +4280,7 @@ fn handle_b2s_stampdmd(sub_matches: &ArgMatches) -> io::Result<ExitCode> {
         json: sub_matches.get_one::<String>(ARG_JSON).map(PathBuf::from),
         write: sub_matches.get_flag(ARG_WRITE),
         backup: !sub_matches.get_flag(ARG_NO_BACKUP),
+        force: sub_matches.get_flag(ARG_FORCE),
         glass_roughness: glass_roughness.unwrap_or(0.1),
         aspect,
         native_grid,

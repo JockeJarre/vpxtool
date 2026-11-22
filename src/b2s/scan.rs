@@ -61,6 +61,10 @@ pub struct ScanArgs {
     /// keep a .bak copy of every file that is written
     pub backup: bool,
 
+    /// overwrite a file that already carries a `<DMD>` tag; without it those
+    /// files are left alone
+    pub force: bool,
+
     /// GlassRoughness value to write
     pub glass_roughness: f64,
 
@@ -310,7 +314,13 @@ pub fn scan(args: ScanArgs) -> Result<Vec<Record>, String> {
         let _ = crate::eprintln!("json written to {}", path.display());
     }
     // the stamp pass: without `write` it only reports the planned edits
-    let stats = stamp::stamp(&records, args.glass_roughness, args.write, args.backup);
+    let stats = stamp::stamp(
+        &records,
+        args.glass_roughness,
+        args.write,
+        args.backup,
+        args.force,
+    );
     stamp::print_stats(&stats, args.write);
     Ok(records)
 }
