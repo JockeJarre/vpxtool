@@ -22,3 +22,5 @@ vpxtool.cfg
 # local B2S test fixtures, copied from /mnt/pinball, never commit
 b2s-testdata/*
 !b2s-testdata/README.md
+DmdDeviceLG-DualUP.ini
+ScreenRes.txt
