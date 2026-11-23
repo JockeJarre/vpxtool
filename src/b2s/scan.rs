@@ -210,41 +210,54 @@ pub fn scan(args: ScanArgs) -> Result<Vec<Record>, String> {
         want_images: !args.no_hole,
     };
 
-    let (tables, b2s_only) = match &args.target {
+    let work: Vec<Work> = match &args.target {
         Target::Directory(root) => {
             let tables = collect(root, args.limit)?;
             let _ = crate::eprintln!("found {} tables under {}", tables.len(), root.display());
-            (tables, None)
+            let mut out: Vec<Work> = tables
+                .into_iter()
+                .map(|(dir, name)| Work::Table { dir, name })
+                .collect();
+            // a folder of downloaded backglasses has no tables at all; scan
+            // the loose .directb2s/.b2spro files too, hole detection works
+            // from the file alone
+            let solo = collect_solo(root, args.limit.map(|n| n.saturating_sub(out.len())));
+            if !solo.is_empty() {
+                let _ = crate::eprintln!(
+                    "found {} backglasses without a table under {}",
+                    solo.len(),
+                    root.display()
+                );
+                out.extend(solo.into_iter().map(|path| Work::Solo { path }));
+            }
+            out
         }
         Target::Table(vpx) => {
             let dir = vpx.parent().ok_or("table path without a folder")?;
             let name = vpx.file_name().ok_or("table path without a file name")?;
-            (
-                vec![(dir.to_path_buf(), name.to_string_lossy().into_owned())],
-                None,
-            )
+            vec![Work::Table {
+                dir: dir.to_path_buf(),
+                name: name.to_string_lossy().into_owned(),
+            }]
         }
         Target::B2s(b2s) => {
             let dir = b2s.parent().ok_or("b2s path without a folder")?;
             let stem = b2s.file_stem().ok_or("b2s path without a file name")?;
             match find_vpx(dir, &stem.to_string_lossy()) {
-                Some(vpx) => (
-                    vec![(
-                        vpx.parent().unwrap().to_path_buf(),
-                        vpx.file_name().unwrap().to_string_lossy().into_owned(),
-                    )],
-                    None,
-                ),
+                Some(vpx) => vec![Work::Table {
+                    dir: vpx.parent().unwrap().to_path_buf(),
+                    name: vpx.file_name().unwrap().to_string_lossy().into_owned(),
+                }],
                 // a backglass without a table: no rom name, no ini lookup,
                 // the hole detection works from the file alone
-                None => (Vec::new(), Some(b2s.clone())),
+                None => vec![Work::Solo { path: b2s.clone() }],
             }
         }
     };
 
     let jobs = args.jobs.max(1);
     let started = std::time::Instant::now();
-    let total = tables.len();
+    let total = work.len();
     // The work per table is decoding the embedded images and parsing 20-50 MB of
     // XML, and the peak of that is the XML of one file, so the workers share a
     // budget of in-flight megabytes: it is what keeps 12 cores from asking for
@@ -252,15 +265,15 @@ pub fn scan(args: ScanArgs) -> Result<Vec<Record>, String> {
     let budget = Budget::default();
     let mut records = if jobs == 1 || total < 2 {
         let mut out = Vec::with_capacity(total);
-        for (dir, vpx_name) in &tables {
-            let cost = estimate(dir, vpx_name);
+        for item in &work {
+            let cost = item.cost();
             budget.claim(cost);
-            out.push(scan_catch(dir, vpx_name, &ini, policy));
+            out.push(match item {
+                Work::Table { dir, name } => scan_catch(dir, name, &ini, policy),
+                Work::Solo { path } => scan_b2s_only(path, &ini, policy),
+            });
             budget.release(cost);
             report_progress(out.len(), total);
-        }
-        if let Some(b2s) = &b2s_only {
-            out.push(scan_b2s_only(b2s, &ini, policy));
         }
         out
     } else {
@@ -275,20 +288,23 @@ pub fn scan(args: ScanArgs) -> Result<Vec<Record>, String> {
                 let done = &done;
                 let budget = &budget;
                 let out = &out;
-                let tables = &tables;
+                let work = &work;
                 let ini = &ini;
                 scope.spawn(move || {
                     loop {
                         let i = next.fetch_add(1, Ordering::SeqCst);
-                        let Some((dir, vpx_name)) = tables.get(i) else {
+                        let Some(item) = work.get(i) else {
                             break;
                         };
-                        let cost = estimate(dir, vpx_name);
+                        let cost = item.cost();
                         while !budget.claim(cost) {
                             // the budget is held by bigger files, wait for one
                             std::thread::sleep(std::time::Duration::from_millis(50));
                         }
-                        let rec = scan_catch(dir, vpx_name, ini, policy);
+                        let rec = match item {
+                            Work::Table { dir, name } => scan_catch(dir, name, ini, policy),
+                            Work::Solo { path } => scan_b2s_only(path, ini, policy),
+                        };
                         budget.release(cost);
                         out.lock().unwrap().push(rec);
                         report_progress(done.fetch_add(1, Ordering::SeqCst) + 1, total);
@@ -300,7 +316,7 @@ pub fn scan(args: ScanArgs) -> Result<Vec<Record>, String> {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     };
     let _ = crate::eprintln!(
-        "{} tables in {:.0}s, peak {} MB in flight",
+        "{} files in {:.0}s, peak {} MB in flight",
         records.len(),
         started.elapsed().as_secs_f64(),
         budget.peak()
@@ -737,6 +753,69 @@ fn to_image_space(window: Rect, image: (u32, u32), policy: Policy) -> Rect {
 }
 
 /// Collects every `*.vpx` in the tree as (directory, file name).
+/// One unit of work: a table with its backglass next to it, or a loose
+/// backglass without a table.
+enum Work {
+    Table { dir: PathBuf, name: String },
+    Solo { path: PathBuf },
+}
+
+impl Work {
+    fn cost(&self) -> i64 {
+        match self {
+            Work::Table { dir, name } => estimate(dir, name),
+            Work::Solo { path } => {
+                let mb = |bytes: u64| (bytes / 1_048_576).max(1) as i64;
+                fs::metadata(path).map(|m| 8 + mb(m.len()) * 3).unwrap_or(8)
+            }
+        }
+    }
+}
+
+/// Loose backglasses under `root` that no table claims: a file is skipped
+/// when a .vpx of a matching name sits next to it, that pair is scanned as
+/// a table. These files have no rom name, so the ini method is out and the
+/// stamp rectangle comes from hole detection.
+fn collect_solo(root: &Path, limit: Option<usize>) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let entries = match fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(e) => {
+                let _ = crate::eprintln!("skip {}: {e}", dir.display());
+                continue;
+            }
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            let claimed = path.extension().is_some_and(|e| {
+                e.eq_ignore_ascii_case("directb2s") || e.eq_ignore_ascii_case("b2spro")
+            });
+            if !claimed {
+                continue;
+            }
+            let Some(stem) = path.file_stem().map(|s| s.to_string_lossy().into_owned()) else {
+                continue;
+            };
+            if find_vpx(&dir, &stem).is_some() {
+                continue;
+            }
+            out.push(path);
+            if let Some(n) = limit
+                && out.len() >= n
+            {
+                return out;
+            }
+        }
+    }
+    out
+}
+
 fn collect(root: &Path, limit: Option<usize>) -> Result<Vec<(PathBuf, String)>, String> {
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
