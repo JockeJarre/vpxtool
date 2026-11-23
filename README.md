@@ -201,23 +201,25 @@ vpxtool b2s stampdmd --method ini --ini DmdDevice.ini tables/
 
 `b2s wizard <TABLES>` calibrates the ini method on your machine. Mapping the
 desktop coordinates of `DmdDevice.ini` into the backglass image needs the
-backglass monitor rectangle - where the backglass screen sits on the desktop
-right of the playfield. The wizard reads the playfield size and the DMD area
-height from `ScreenRes.txt` (the B2S default arrangement puts the backglass
-window right of the playfield, its bottom reaching the DMD area height
-below the playfield), asks
-for what it cannot find, then *verifies* that candidate against your own
-tables: on every table with both a detected DMD window and an ini section,
-the median offset of the mapped ini rect to the detected window says where
-the candidate is wrong, and the wizard corrects it. A median of a few pixels
-over dozens of tables means the geometry is right; the wizard shows the
-numbers, and writes
+backglass monitor rectangle - where the backglass screen sits on the desktop.
+No file knows that: it is Windows display placement, negative coordinates
+included. The wizard starts from the default arrangement (backglass right of
+the playfield, x0 = playfield width read from `ScreenRes.txt`, y0 = 0), asks
+for the screen sizes - `ScreenRes.txt` can be stale after a resolution
+change, so its numbers are only the defaults of the questions - and then
+*verifies* the candidate against your own tables: on every table with both a
+detected DMD window and an ini section, the median offset of the mapped ini
+rect to the detected window says where the candidate is wrong, and the
+wizard corrects it. A median of a few pixels over dozens of tables means the
+geometry is right; the wizard shows the numbers, and writes the rectangle to
+the config key `b2s_backglass_monitor`. `b2s_backglass_monitor` is in the coordinate space of `DmdDevice.ini` - the
+desktop as classic Win32 programs see it. On a display with scaling, that is
+the scaled space: a 1707x1920 panel at 150% is 2560x2880 at x 3840 there, and
+those are the numbers to use (physical times the scale factor). Display
+settings show the physical pixels; the wizard measures the scaled ones and is
+the safe route on a machine with scaling.
 
-```toml
-b2s_backglass_monitor = "3840,0,2560,2880"
-```
-
-into the vpxtool config. `--monitor` overrides it per run; `--yes` accepts
+`--monitor` overrides it per run; `--yes` accepts
 the findings without asking.
 
 ```shell
