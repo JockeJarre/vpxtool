@@ -1621,7 +1621,7 @@ fn build_command() -> Command {
                                 .required(true)
                                 .value_name("FILE")
                                 .value_hint(ValueHint::AnyPath)
-                                .help("The .directb2s/.b2spro files"),
+                                .help("The .directb2s/.b2spro files, folders of them, or a mix"),
                         )
                         .arg(
                             Arg::new(ARG_OUTPUT_DIR)
@@ -1657,7 +1657,7 @@ fn build_command() -> Command {
                                 .required(true)
                                 .value_name("FILE")
                                 .value_hint(ValueHint::AnyPath)
-                                .help("The .directb2s/.b2spro files to import into"),
+                                .help("The .directb2s/.b2spro files to import into, or folders containing them"),
                         )
                         .arg(
                             Arg::new("DIR")
@@ -4154,25 +4154,47 @@ fn handle_b2s(sub_matches: &ArgMatches) -> io::Result<ExitCode> {
     }
 }
 
+fn expand_b2s_paths(values: &[String]) -> io::Result<Vec<PathBuf>> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    for value in values {
+        let path = path_exists(value)?;
+        if path.is_dir() {
+            let mut found: Vec<PathBuf> = std::fs::read_dir(&path)?
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|f| f.is_file() && is_b2s_file(f))
+                .collect();
+            found.sort();
+            if found.is_empty() {
+                return Err(io::Error::other(format!(
+                    "{}: no .directb2s/.b2spro files in this folder",
+                    path.display()
+                )));
+            }
+            out.extend(found);
+        } else if !is_b2s_file(&path) {
+            return Err(io::Error::other(format!(
+                "{}: not a .directb2s/.b2spro file",
+                path.display()
+            )));
+        } else {
+            out.push(path);
+        }
+    }
+    Ok(out)
+}
+
 fn is_b2s_file(path: &Path) -> bool {
     path.extension()
         .is_some_and(|e| e.eq_ignore_ascii_case("directb2s") || e.eq_ignore_ascii_case("b2spro"))
 }
 
 fn handle_b2s_extract(sub_matches: &ArgMatches) -> io::Result<ExitCode> {
-    let paths: Vec<PathBuf> = sub_matches
-        .get_many::<String>("PATHS")
-        .map(|values| values.map(path_exists).collect::<io::Result<_>>())
-        .transpose()?
-        .unwrap_or_default();
-    for path in &paths {
-        if !is_b2s_file(path) {
-            return Err(io::Error::other(format!(
-                "{}: not a .directb2s/.b2spro file",
-                path.display()
-            )));
-        }
-    }
+    let paths: Vec<PathBuf> = expand_b2s_paths(
+        &sub_matches
+            .get_many::<String>("PATHS")
+            .map(|values| values.cloned().collect::<Vec<_>>())
+            .unwrap_or_default(),
+    )?;
     let force = sub_matches.get_flag(ARG_FORCE);
     let out_flag = sub_matches
         .get_one::<String>(ARG_OUTPUT_DIR)
@@ -4234,19 +4256,12 @@ fn handle_b2s_extract(sub_matches: &ArgMatches) -> io::Result<ExitCode> {
 }
 
 fn handle_b2s_import(sub_matches: &ArgMatches) -> io::Result<ExitCode> {
-    let paths: Vec<PathBuf> = sub_matches
-        .get_many::<String>("PATHS")
-        .map(|values| values.map(path_exists).collect::<io::Result<_>>())
-        .transpose()?
-        .unwrap_or_default();
-    for path in &paths {
-        if !is_b2s_file(path) {
-            return Err(io::Error::other(format!(
-                "{}: not a .directb2s/.b2spro file",
-                path.display()
-            )));
-        }
-    }
+    let paths: Vec<PathBuf> = expand_b2s_paths(
+        &sub_matches
+            .get_many::<String>("PATHS")
+            .map(|values| values.cloned().collect::<Vec<_>>())
+            .unwrap_or_default(),
+    )?;
     let dir_flag = sub_matches.get_one::<String>("DIR").map(PathBuf::from);
     let backup = !sub_matches.get_flag(ARG_NO_BACKUP);
 

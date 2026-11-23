@@ -179,7 +179,10 @@ vpxtool optimize --max-image-size=768 table.vpx
 ```shell
 vpxtool b2s extract "table.directb2s"
 vpxtool b2s extract -o images/ "table.b2spro"
+vpxtool b2s extract backglass-folder/   # every .directb2s/.b2spro in the folder
 ```
+
+Accepts files, folders (all `.directb2s`/`.b2spro` inside), or a mix; `b2s import` takes the same.
 
 `b2s stampdmd` writes the `<DMD Target="Backglass" X=".." Y=".." W=".." H=".." GlassRoughness=".."/>` element into the backglass files, so B2S renders the rom's DMD inside the grill window (the punch-out). The rectangle is detected from the file itself by locating the DMD window of the grill strip in the embedded backglass image; when no window is found, the position configured for the table's rom (the `cGameName` from the table script, sidecar `.vbs` first) in `DmdDevice.ini` is mapped into the backglass image. The files are edited in place and the base64 payloads are copied through untouched, so only the DMD element changes; a `.bak` copy is kept unless `--no-backup`. Without `--write` this is a dry run. The path can be a folder tree, one `.vpx` or one `.directb2s`/`.b2spro`; the partner file of a matching name is found next to it. A file that already carries a `<DMD>` tag is the marker of a finished backglass - authored by a B2S editor or stamped by an earlier run - and is left alone; `--force` overwrites it.
 
