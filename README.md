@@ -199,6 +199,30 @@ vpxtool b2s stampdmd "table.directb2s"  # one backglass, table found next to it
 vpxtool b2s stampdmd --method ini --ini DmdDevice.ini tables/
 ```
 
+`b2s wizard <TABLES>` calibrates the ini method on your machine. Mapping the
+desktop coordinates of `DmdDevice.ini` into the backglass image needs the
+backglass monitor rectangle - where the backglass screen sits on the desktop
+right of the playfield. The wizard reads the playfield size and the DMD area
+height from `ScreenRes.txt` (the B2S default arrangement puts the backglass
+window right of the playfield, its top lowered by the DMD area height), asks
+for what it cannot find, then *verifies* that candidate against your own
+tables: on every table with both a detected DMD window and an ini section,
+the median offset of the mapped ini rect to the detected window says where
+the candidate is wrong, and the wizard corrects it. A median of a few pixels
+over dozens of tables means the geometry is right; the wizard shows the
+numbers, and writes
+
+```toml
+b2s_backglass_monitor = "3840,0,2560,2880"
+```
+
+into the vpxtool config. `--monitor` overrides it per run; `--yes` accepts
+the findings without asking.
+
+```shell
+vpxtool b2s wizard tables/
+```
+
 See [src/b2s/DESIGN.md](src/b2s/DESIGN.md) for how the detection works.
 
 ### Logging

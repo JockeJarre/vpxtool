@@ -171,7 +171,17 @@ pub struct Record {
     pub notes: Vec<String>,
 }
 
+/// The scan without the report and the stamp pass: what the wizard wants.
+pub fn scan_quiet(args: ScanArgs) -> Result<Vec<Record>, String> {
+    scan_impl(args, true)
+}
+
+/// Scans the target, prints the report and runs the stamp pass.
 pub fn scan(args: ScanArgs) -> Result<Vec<Record>, String> {
+    scan_impl(args, false)
+}
+
+fn scan_impl(args: ScanArgs, quiet: bool) -> Result<Vec<Record>, String> {
     let ini_path = args
         .ini
         .clone()
@@ -323,6 +333,9 @@ pub fn scan(args: ScanArgs) -> Result<Vec<Record>, String> {
     );
     records.sort_by(|a, b| a.vpx.cmp(&b.vpx));
 
+    if quiet {
+        return Ok(records);
+    }
     report::print(&records);
     if let Some(path) = &args.json {
         let json = serde_json::to_string_pretty(&records).map_err(|e| e.to_string())?;

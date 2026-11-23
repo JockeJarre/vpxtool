@@ -137,6 +137,56 @@ impl ResolvedConfig {
     }
 }
 
+/// Sets `b2s_backglass_monitor` in the vpxtool config file, keeping the
+/// rest of the file. The wizard writes the monitor it measured.
+pub fn set_b2s_backglass_monitor(value: &str) -> io::Result<PathBuf> {
+    // an existing file wins; a fresh one goes to the home configuration path
+    let path = config_path().unwrap_or_else(home_config_path);
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    // the file is kept as a document, so comments, key order and keys that
+    // this version of vpxtool does not know survive the edit
+    let mut doc: toml::Table = if text.trim().is_empty() {
+        toml::Table::new()
+    } else {
+        text.parse::<toml::Value>()
+            .map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("parse {}: {e}", path.display()),
+                )
+            })?
+            .try_into()
+            .map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("{}: top level is not a table", path.display()),
+                )
+            })?
+    };
+    doc.insert(
+        "b2s_backglass_monitor".to_string(),
+        toml::Value::String(value.to_string()),
+    );
+    // a freshly created file gets a placeholder for the one required key, so
+    // that load_config accepts it; the user is told to fill it in
+    if doc.get("vpx_executable").is_none() {
+        doc.insert(
+            "vpx_executable".to_string(),
+            toml::Value::String(String::new()),
+        );
+        crate::println!(
+            "  note: created the config file, set vpx_executable in it to your Visual Pinball install"
+        )?;
+    }
+    let out = toml::to_string_pretty(&doc)
+        .map_err(|e| io::Error::other(format!("serialize {}: {e}", path.display())))?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&path, out)?;
+    Ok(path)
+}
+
 pub fn config_path() -> Option<PathBuf> {
     let home_directory_configuration_path = home_config_path();
     if home_directory_configuration_path.exists() {

@@ -69,9 +69,11 @@ const CMD_LOCK_STATUS: &str = "lock-status";
 const CMD_B2S: &str = "b2s";
 const CMD_IMPORT: &str = "import";
 const CMD_B2S_STAMPDMD: &str = "stampdmd";
+const CMD_B2S_WIZARD: &str = "wizard";
 
 const ARG_OUTPUT_DIR: &str = "OUTPUT_DIR";
 const ARG_INI: &str = "INI";
+const ARG_YES: &str = "YES";
 const ARG_METHOD: &str = "METHOD";
 const ARG_ASPECT: &str = "ASPECT";
 const ARG_NATIVE_GRID: &str = "NATIVE_GRID";
@@ -1781,6 +1783,52 @@ fn build_command() -> Command {
                                 .value_name("FILE")
                                 .value_hint(ValueHint::FilePath)
                                 .help("Also write the collected data as JSON for analysis"),
+                        ),
+                )
+                .subcommand(
+                    Command::new(CMD_B2S_WIZARD)
+                        .about("Measure the backglass monitor and write it to the config")
+                        .long_about(
+                            "The ini method maps the desktop coordinates of DmdDevice.ini into \
+                            the backglass image, and that needs the backglass monitor: where it \
+                            sits on the desktop right of the playfield monitor, and its size. \
+                            The default 2560,0,2560,2880 is a guess; on a 4K playfield it slides \
+                            every stamp by over a thousand pixels.\n\n\
+                            The wizard measures the real value from your own installation: it \
+                            asks for DmdDevice.ini, scans the tables (hole detection plus the \
+                            ini lookup), solves the monitor from the tables whose detected DMD \
+                            window and ini section agree, shows the residuals, and writes\n\
+                            b2s_backglass_monitor = \"x,y,width,height\"\n\
+                            into the vpxtool config. --monitor overrides it per run.",
+                        )
+                        .arg(
+                            Arg::new("PATHS")
+                                .num_args(1)
+                                .required(true)
+                                .value_name("PATH")
+                                .value_hint(ValueHint::AnyPath)
+                                .help("A folder tree of tables to calibrate from (more is better)"),
+                        )
+                        .arg(
+                            Arg::new(ARG_INI)
+                                .long("ini")
+                                .value_name("FILE")
+                                .value_hint(ValueHint::FilePath)
+                                .help("Path of DmdDevice.ini. The wizard asks when not given"),
+                        )
+                        .arg(
+                            Arg::new(ARG_JOBS)
+                                .long("jobs")
+                                .value_name("N")
+                                .value_parser(clap::value_parser!(usize))
+                                .help("Tables read in parallel (default: number of cores)"),
+                        )
+                        .arg(
+                            Arg::new(ARG_YES)
+                                .short('y')
+                                .long("yes")
+                                .num_args(0)
+                                .help("Accept the findings without asking (non-interactive)"),
                         ),
                 ),
         )
@@ -4150,8 +4198,30 @@ fn handle_b2s(sub_matches: &ArgMatches) -> io::Result<ExitCode> {
         Some((CMD_EXTRACT, sub_matches)) => handle_b2s_extract(sub_matches),
         Some((CMD_IMPORT, sub_matches)) => handle_b2s_import(sub_matches),
         Some((CMD_B2S_STAMPDMD, sub_matches)) => handle_b2s_stampdmd(sub_matches),
+        Some((CMD_B2S_WIZARD, sub_matches)) => handle_b2s_wizard(sub_matches),
         _ => unreachable!(),
     }
+}
+
+fn handle_b2s_wizard(sub_matches: &ArgMatches) -> io::Result<ExitCode> {
+    let path = sub_matches
+        .get_one::<String>("PATHS")
+        .map(PathBuf::from)
+        .expect("PATHS is required");
+    let target = b2s_target_from(&path)?;
+    let ini = sub_matches.get_one::<String>(ARG_INI).map(PathBuf::from);
+    let jobs = *sub_matches
+        .get_one::<usize>(ARG_JOBS)
+        .unwrap_or(&crate::b2s::scan::default_jobs());
+    let yes = sub_matches.get_flag(ARG_YES);
+    crate::b2s::wizard::run(&crate::b2s::wizard::WizardArgs {
+        target,
+        ini,
+        jobs,
+        yes,
+    })
+    .map_err(io::Error::other)?;
+    Ok(ExitCode::SUCCESS)
 }
 
 fn expand_b2s_paths(values: &[String]) -> io::Result<Vec<PathBuf>> {
@@ -4302,27 +4372,31 @@ fn handle_b2s_import(sub_matches: &ArgMatches) -> io::Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
+fn b2s_target_from(path: &Path) -> io::Result<crate::b2s::scan::Target> {
+    let path = path_exists(path)?;
+    if path.is_dir() {
+        Ok(crate::b2s::scan::Target::Directory(path))
+    } else if path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("vpx"))
+    {
+        Ok(crate::b2s::scan::Target::Table(path))
+    } else if is_b2s_file(&path) {
+        Ok(crate::b2s::scan::Target::B2s(path))
+    } else {
+        Err(io::Error::other(format!(
+            "{}: expected a folder, a .vpx, a .directb2s or a .b2spro",
+            path.display()
+        )))
+    }
+}
+
 fn handle_b2s_stampdmd(sub_matches: &ArgMatches) -> io::Result<ExitCode> {
     let path = sub_matches
         .get_one::<String>("PATHS")
         .map(PathBuf::from)
         .expect("PATHS is required");
-    let path = path_exists(&path)?;
-    let target = if path.is_dir() {
-        crate::b2s::scan::Target::Directory(path)
-    } else if path
-        .extension()
-        .is_some_and(|e| e.eq_ignore_ascii_case("vpx"))
-    {
-        crate::b2s::scan::Target::Table(path)
-    } else if is_b2s_file(&path) {
-        crate::b2s::scan::Target::B2s(path)
-    } else {
-        return Err(io::Error::other(format!(
-            "{}: expected a folder, a .vpx, a .directb2s or a .b2spro",
-            path.display()
-        )));
-    };
+    let target = b2s_target_from(&path)?;
 
     let method = match sub_matches
         .get_one::<String>(ARG_METHOD)

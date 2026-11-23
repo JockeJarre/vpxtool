@@ -18,6 +18,7 @@ pub mod report;
 pub mod rom;
 pub mod scan;
 pub mod stamp;
+pub mod wizard;
 pub mod xml;
 
 use std::fmt::Display;
