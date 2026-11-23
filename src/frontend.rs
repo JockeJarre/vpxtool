@@ -1323,6 +1323,7 @@ mod tests {
             editor: None,
             vpxz_excludes: vec![],
             menu_keys: KeyMap::default(),
+            b2s_backglass_monitor: None,
         };
         let labels: Vec<String> = TableOption::template_ini_options(&config)
             .iter()

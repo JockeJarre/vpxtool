@@ -280,6 +280,13 @@ tables_folder = "/home/myuser/vpinball/tables"
 vpx_config = "/home/myuser/.local/share/VPinballX/10.8/VPinballX.ini"
 # how deep the frontend looks for tables below the tables folder
 tables_scan_max_depth = 3
+
+# the backglass monitor in desktop pixels, for `b2s stampdmd --method ini`:
+# DmdDevice.ini stores desktop-absolute coordinates, so the x of the
+# backglass monitor (it sits right of the playfield monitor) is subtracted
+# before mapping into the backglass image. A 4K playfield and a 2560x2880
+# backglass monitor give:
+b2s_backglass_monitor = "3840,0,2560,2880"
 ```
 
 Further settings will be picked up from the Visual Pinball config.

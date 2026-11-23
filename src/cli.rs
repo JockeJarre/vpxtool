@@ -1730,7 +1730,7 @@ fn build_command() -> Command {
                             Arg::new(ARG_MONITOR)
                                 .long("monitor")
                                 .value_name("X,Y,W,H")
-                                .help("The backglass monitor in desktop pixels (default 2560,0,2560,2880)"),
+                                .help("The backglass monitor in desktop pixels (default 2560,0,2560,2880, config key b2s_backglass_monitor)"),
                         )
                         .arg(
                             Arg::new(ARG_GLASS)
@@ -4358,12 +4358,26 @@ fn handle_b2s_stampdmd(sub_matches: &ArgMatches) -> io::Result<ExitCode> {
         .map(|s| s.parse::<crate::b2s::Grid>())
         .transpose()
         .map_err(io::Error::other)?;
-    let backglass_monitor = sub_matches
+    let app_config = crate::config::load_config()?.map(|(_, config)| config);
+    // a monitor from the command line wins over the config file, the config
+    // over the default; a cabinet with a 4K playfield monitor needs the config
+    // key b2s_backglass_monitor, the ini coords are desktop-absolute
+    let monitor_string = sub_matches
         .get_one::<String>(ARG_MONITOR)
-        .map(|s| s.parse::<crate::b2s::Rect>())
-        .transpose()
-        .map_err(io::Error::other)?
-        .unwrap_or_else(|| crate::b2s::Rect::new(2560.0, 0.0, 2560.0, 2880.0));
+        .cloned()
+        .or_else(|| {
+            app_config
+                .as_ref()
+                .and_then(|config| config.b2s_backglass_monitor.clone())
+        });
+    let backglass_monitor = match monitor_string.as_deref() {
+        Some(s) => s.parse::<crate::b2s::Rect>().map_err(|e| {
+            io::Error::other(format!(
+                "backglass monitor {s:?}: {e} (want x,y,width,height in pixels)"
+            ))
+        })?,
+        None => crate::b2s::Rect::new(2560.0, 0.0, 2560.0, 2880.0),
+    };
     let glass_roughness = sub_matches
         .get_one::<String>(ARG_GLASS)
         .map(|s| {
@@ -4374,7 +4388,7 @@ fn handle_b2s_stampdmd(sub_matches: &ArgMatches) -> io::Result<ExitCode> {
 
     // the configured pinmame folder is a candidate for DmdDevice.ini too
     let mut ini_extra = Vec::new();
-    if let Ok(Some((_, config))) = crate::config::load_config() {
+    if let Some(config) = &app_config {
         ini_extra.push(config.configured_pinmame_folder().unwrap_or_default());
     }
 

@@ -43,6 +43,11 @@ pub struct Config {
     pub launch_templates: Option<Vec<LaunchTemplate>>,
     pub vpxz_excludes: Option<Vec<String>>,
     pub frontend: Option<FrontendConfig>,
+    /// The backglass monitor of the desktop, `x,y,width,height` in pixels.
+    /// `b2s stampdmd` maps the desktop coordinates of DmdDevice.ini into the
+    /// backglass image with it, so it must say where the backglass monitor
+    /// sits next to the playfield monitor, e.g. `3840,0,2560,2880`.
+    pub b2s_backglass_monitor: Option<String>,
 }
 
 #[derive(PartialEq, Debug, Clone)]
@@ -57,6 +62,7 @@ pub struct ResolvedConfig {
     pub editor: Option<String>,
     pub vpxz_excludes: Vec<String>,
     pub menu_keys: KeyMap,
+    pub b2s_backglass_monitor: Option<String>,
 }
 
 pub fn default_vpxz_excludes() -> Vec<String> {
@@ -246,6 +252,7 @@ fn read_config(config_path: &Path) -> io::Result<ResolvedConfig> {
         editor: config.editor,
         vpxz_excludes: config.vpxz_excludes.unwrap_or_else(default_vpxz_excludes),
         menu_keys,
+        b2s_backglass_monitor: config.b2s_backglass_monitor,
     };
     Ok(resolved_config)
 }
@@ -484,6 +491,7 @@ fn write_default_config(config_file: &Path, vpx_executable: &Path) -> io::Result
         editor: None,
         vpxz_excludes: None,
         frontend: None,
+        b2s_backglass_monitor: None,
     };
     write_config(config_file, &config)?;
     Ok(())
@@ -566,6 +574,7 @@ mod tests {
             editor: None,
             vpxz_excludes: vec![],
             menu_keys: KeyMap::default(),
+            b2s_backglass_monitor: None,
         }
     }
 
@@ -659,6 +668,7 @@ mod tests {
                 editor: None,
                 vpxz_excludes: default_vpxz_excludes(),
                 menu_keys: KeyMap::default(),
+                b2s_backglass_monitor: None,
             }
         );
         Ok(())
@@ -787,6 +797,7 @@ mod tests {
                 editor: None,
                 vpxz_excludes: default_vpxz_excludes(),
                 menu_keys: KeyMap::default(),
+                b2s_backglass_monitor: None,
             }
         );
         Ok(())
@@ -825,6 +836,7 @@ mod tests {
                 editor: None,
                 vpxz_excludes: default_vpxz_excludes(),
                 menu_keys: KeyMap::default(),
+                b2s_backglass_monitor: None,
             }
         );
         Ok(())
@@ -965,6 +977,7 @@ tables_scan_max_depth = 2
             editor: None,
             vpxz_excludes: default_vpxz_excludes(),
             menu_keys: KeyMap::default(),
+            b2s_backglass_monitor: None,
         };
 
         // Must not panic; the broken ini is treated as unparseable.
@@ -999,6 +1012,7 @@ tables_scan_max_depth = 2
             editor: None,
             vpxz_excludes: default_vpxz_excludes(),
             menu_keys: KeyMap::default(),
+            b2s_backglass_monitor: None,
         };
 
         assert_eq!(

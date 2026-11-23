@@ -585,6 +585,22 @@ fn analyze(
         }
     }
 
+    // The ini coords are desktop pixels; if the backglass monitor passed to
+    // `--monitor` starts at the wrong x (a 4K playfield monitor is 3840 wide,
+    // not 2560), the mapped rect slides by hundreds of pixels and nobody
+    // notices. A detected window that lies far from the mapped ini rect in x
+    // is that disagreement, so say it out loud instead of stamping silently.
+    if let (Some(h), Some(m), Some((w, _))) =
+        (rec.hole_backglass, rec.ini_in_image, rec.backglass_size)
+    {
+        let dx = (h.x + h.w / 2.0 - (m.x + m.w / 2.0)).abs();
+        if dx > 0.10 * w as f64 {
+            rec.notes.push(format!(
+                "hole and ini rect disagree by {dx:.0} px in x: the ini coords are desktop pixels, check --monitor / config key b2s_backglass_monitor"
+            ));
+        }
+    }
+
     if let Some((rect, source)) = pick(policy, rec) {
         rec.chosen = Some(rect);
         rec.source = Some(source.to_string());
@@ -607,12 +623,12 @@ fn analyze(
     } else if !has_dmd_evidence(rec) {
         if rec.hole_backglass.is_some() {
             rec.notes.push(
-                "flat rectangle found but no DMD evidence (no DMDImage, tag or ini section): not stamping, left untouched"
+                "flat rectangle found but no DMD evidence (no DMDImage, tag, ini section or rom name): not stamping, left untouched"
                     .into(),
             );
         } else {
             rec.notes.push(
-                "no DMD evidence (no DMDImage, tag or ini section): nothing to stamp, left untouched"
+                "no DMD evidence (no DMDImage, tag, ini section or rom name): nothing to stamp, left untouched"
                     .into(),
             );
         }
@@ -666,11 +682,15 @@ fn authored_tag(rec: &Record) -> Option<Rect> {
 }
 
 /// Does anything say this backglass has a DMD at all? A `DMDImage` or an
-/// authored tag is the author's word, an ini section is the user's. Without one
+/// authored tag is the author's word, an ini section is the user's, and a rom
+/// name in the script means the table drives a real DMD machine. Without one
 /// of these, a detected rectangle is a flat band of the artwork, not a window:
 /// the 8 false stamps of one library had no tag, and most had no DMDImage.
 fn has_dmd_evidence(rec: &Record) -> bool {
-    rec.ini_section || rec.dmd_image_size.is_some() || authored_tag(rec).is_some()
+    rec.ini_section
+        || rec.dmd_image_size.is_some()
+        || rec.rom.is_some()
+        || authored_tag(rec).is_some()
 }
 
 /// The rectangle to stamp and where it came from.
