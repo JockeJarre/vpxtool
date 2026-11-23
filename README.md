@@ -205,8 +205,10 @@ backglass monitor rectangle - where the backglass screen sits on the desktop.
 No file knows that: it is Windows display placement, negative coordinates
 included. The wizard starts from the default arrangement (backglass right of
 the playfield, x0 = playfield width read from `ScreenRes.txt`, y0 = 0), asks
-for the screen sizes - `ScreenRes.txt` can be stale after a resolution
-change, so its numbers are only the defaults of the questions - and then
+for the screen sizes - the V6 `ScreenRes.txt` states the backglass window
+size in the ini's space and is used as the default there, older formats and
+stale files fall back to the Windows monitor list, and all numbers are only
+the defaults of the questions - and then
 *verifies* the candidate against your own tables: on every table with both a
 detected DMD window and an ini section, the median offset of the mapped ini
 rect to the detected window says where the candidate is wrong, and the
