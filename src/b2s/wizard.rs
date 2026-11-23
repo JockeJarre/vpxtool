@@ -136,6 +136,33 @@ fn prompt_number(question: &str, default: f64, interactive: bool) -> io::Result<
         .map_err(|e| io::Error::other(format!("{question}: {answer:?} is not a number: {e}")))
 }
 
+/// The Visual Pinball executable, found by walking up from DmdDevice.ini:
+/// the ini lives in the VPinMAME folder of the install, and the exe in the
+/// install root. This is how a config file written on a machine with several
+/// vPinball folders gets the right one.
+pub fn detect_vpx_executable(ini_path: &Path) -> Option<PathBuf> {
+    const NAMES: [&str; 5] = [
+        "VPinballX_64.exe",
+        "VPinballX64.exe",
+        "VPinballX.exe",
+        "VPinballX_GL",
+        "vpinballx_gl",
+    ];
+    let mut dir = ini_path.parent();
+    let mut depth = 0;
+    while let Some(d) = dir.filter(|_| depth < 4) {
+        for name in NAMES {
+            let candidate = d.join(name);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+        dir = d.parent();
+        depth += 1;
+    }
+    None
+}
+
 fn confirm(question: &str, interactive: bool) -> io::Result<bool> {
     let answer = prompt_line(&format!("{question} (y/n)"), Some("y"), interactive)?;
     Ok(answer.eq_ignore_ascii_case("y") || answer.eq_ignore_ascii_case("yes"))
@@ -374,7 +401,11 @@ pub fn run(args: &WizardArgs) -> io::Result<()> {
         )?;
         return Ok(());
     }
-    let path = crate::config::set_b2s_backglass_monitor(&rect_string(&monitor))?;
+    let vpx = detect_vpx_executable(&ini_path);
+    if let Some(exe) = &vpx {
+        crate::println!("  vpx_executable for the config: {}", exe.display())?;
+    }
+    let path = crate::config::set_b2s_backglass_monitor(&rect_string(&monitor), vpx.as_deref())?;
     crate::println!(
         "step 5: wrote b2s_backglass_monitor = \"{}\" to {}",
         rect_string(&monitor),

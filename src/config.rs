@@ -80,7 +80,12 @@ pub fn default_vpxz_excludes() -> Vec<String> {
 impl ResolvedConfig {
     pub fn global_pinmame_folder(&self) -> PathBuf {
         if cfg!(target_os = "windows") {
-            self.vpx_executable.parent().unwrap().join("VPinMAME")
+            // an empty vpx_executable (a freshly written config the user has
+            // not filled in yet) has no parent, and must not panic here
+            self.vpx_executable
+                .parent()
+                .unwrap_or(Path::new("."))
+                .join("VPinMAME")
         } else {
             dirs::home_dir().unwrap().join(".pinmame")
         }
@@ -139,7 +144,10 @@ impl ResolvedConfig {
 
 /// Sets `b2s_backglass_monitor` in the vpxtool config file, keeping the
 /// rest of the file. The wizard writes the monitor it measured.
-pub fn set_b2s_backglass_monitor(value: &str) -> io::Result<PathBuf> {
+pub fn set_b2s_backglass_monitor(
+    value: &str,
+    vpx_executable: Option<&Path>,
+) -> io::Result<PathBuf> {
     // an existing file wins; a fresh one goes to the home configuration path
     let path = config_path().unwrap_or_else(home_config_path);
     let text = std::fs::read_to_string(&path).unwrap_or_default();
@@ -167,16 +175,19 @@ pub fn set_b2s_backglass_monitor(value: &str) -> io::Result<PathBuf> {
         "b2s_backglass_monitor".to_string(),
         toml::Value::String(value.to_string()),
     );
-    // a freshly created file gets a placeholder for the one required key, so
-    // that load_config accepts it; the user is told to fill it in
+    // the one required key: an existing file keeps its value, a fresh one
+    // gets the detected install, and only as a last resort the empty string
+    // (load_config requires the key; the defaults tolerate an empty value)
     if doc.get("vpx_executable").is_none() {
-        doc.insert(
-            "vpx_executable".to_string(),
-            toml::Value::String(String::new()),
-        );
-        crate::println!(
-            "  note: created the config file, set vpx_executable in it to your Visual Pinball install"
-        )?;
+        let value = vpx_executable
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        doc.insert("vpx_executable".to_string(), toml::Value::String(value));
+        if vpx_executable.is_none() {
+            crate::println!(
+                "  note: created the config file, set vpx_executable in it to your Visual Pinball install"
+            )?;
+        }
     }
     let out = toml::to_string_pretty(&doc)
         .map_err(|e| io::Error::other(format!("serialize {}: {e}", path.display())))?;
@@ -453,7 +464,10 @@ pub fn rewrite_vpx_config(config_file: &Path, vpx_config: &Path) -> io::Result<(
 
 fn legacy_vpinball_ini(vpx_executable_path: &Path) -> PathBuf {
     if cfg!(target_os = "windows") {
-        vpx_executable_path.parent().unwrap().join("VPinballX.ini")
+        vpx_executable_path
+            .parent()
+            .unwrap_or(Path::new("."))
+            .join("VPinballX.ini")
     } else {
         dirs::home_dir()
             .unwrap()
@@ -562,7 +576,10 @@ pub fn default_tables_root(vpx_executable: &Path) -> PathBuf {
     if cfg!(target_os = "macos") {
         dirs::home_dir().unwrap().join(".vpinball").join("tables")
     } else {
-        vpx_executable.parent().unwrap().join("tables")
+        vpx_executable
+            .parent()
+            .unwrap_or(Path::new("."))
+            .join("tables")
     }
 }
 
