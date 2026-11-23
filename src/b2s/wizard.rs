@@ -60,6 +60,12 @@ impl Geometry {
     }
 }
 
+/// The DMD strip question, spelled out: the term comes from the B2S
+/// installation, a user meets it in ScreenRes.txt and in the B2S Display
+/// Setup dialog, and the connection to the backglass position is the whole
+/// point of asking.
+const DMD_AREA_QUESTION: &str = "  the DMD strip that B2S draws on the playfield screen, the backglass top edge aligns with its top\n    (B2S Display Setup: DMD Area Height; ScreenRes.txt: \"width/height of the B2S (or Full) DMD area\", the second number; default 550)\n  strip height (pixels)";
+
 /// The default B2S DMD area height in ScreenRes.txt.
 const DEFAULT_DMD_AREA_H: f64 = 550.0;
 
@@ -302,11 +308,7 @@ pub fn run(args: &WizardArgs) -> io::Result<()> {
                     g.playfield_h,
                     interactive,
                 )?,
-                dmd_area_h: prompt_number(
-                    "  height of the B2S DMD area at the playfield bottom (ScreenRes.txt line 10)",
-                    g.dmd_area_h,
-                    interactive,
-                )?,
+                dmd_area_h: prompt_number(DMD_AREA_QUESTION, g.dmd_area_h, interactive)?,
             }
         }
         None => {
@@ -314,11 +316,7 @@ pub fn run(args: &WizardArgs) -> io::Result<()> {
             Geometry {
                 playfield_w: prompt_number("  playfield width (pixels)", 2560.0, interactive)?,
                 playfield_h: prompt_number("  playfield height (pixels)", 1440.0, interactive)?,
-                dmd_area_h: prompt_number(
-                    "  height of the B2S DMD area at the playfield bottom (ScreenRes.txt line 10, default 550)",
-                    550.0,
-                    interactive,
-                )?,
+                dmd_area_h: prompt_number(DMD_AREA_QUESTION, 550.0, interactive)?,
             }
         }
     };
