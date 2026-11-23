@@ -127,6 +127,15 @@ fn prompt_line(question: &str, default: Option<&str>, interactive: bool) -> io::
     Ok(answer.to_string())
 }
 
+/// Asks for a number, `default` shown in brackets and taken on an empty
+/// answer.
+fn prompt_number(question: &str, default: f64, interactive: bool) -> io::Result<f64> {
+    let answer = prompt_line(question, Some(&format!("{default:.0}")), interactive)?;
+    answer
+        .parse::<f64>()
+        .map_err(|e| io::Error::other(format!("{question}: {answer:?} is not a number: {e}")))
+}
+
 fn confirm(question: &str, interactive: bool) -> io::Result<bool> {
     let answer = prompt_line(&format!("{question} (y/n)"), Some("y"), interactive)?;
     Ok(answer.eq_ignore_ascii_case("y") || answer.eq_ignore_ascii_case("yes"))
@@ -236,45 +245,42 @@ pub fn run(args: &WizardArgs) -> io::Result<()> {
                 g.playfield_h,
                 g.dmd_area_h
             )?;
-            g
+            // the file can be stale - a resolution change is one click in the
+            // Windows settings, ScreenRes.txt is only rewritten by the B2S
+            // setup -, so the parsed numbers are the defaults, not the answer
+            Geometry {
+                playfield_w: prompt_number(
+                    "  playfield width (pixels)",
+                    g.playfield_w,
+                    interactive,
+                )?,
+                playfield_h: prompt_number(
+                    "  playfield height (pixels)",
+                    g.playfield_h,
+                    interactive,
+                )?,
+                dmd_area_h: prompt_number(
+                    "  height of the B2S DMD area at the playfield bottom (ScreenRes.txt line 10)",
+                    g.dmd_area_h,
+                    interactive,
+                )?,
+            }
         }
         None => {
             crate::println!("  no ScreenRes.txt found in the table folder")?;
-            let playfield_w = prompt_line("  playfield width (pixels)", Some("2560"), interactive)?
-                .parse::<f64>()
-                .map_err(|e| io::Error::other(format!("playfield width: {e}")))?;
-            let playfield_h =
-                prompt_line("  playfield height (pixels)", Some("1440"), interactive)?
-                    .parse::<f64>()
-                    .map_err(|e| io::Error::other(format!("playfield height: {e}")))?;
-            let dmd_area_h = prompt_line(
-                "  height of the B2S DMD area at the playfield bottom (ScreenRes.txt line 10, default 550)",
-                Some("550"),
-                interactive,
-            )?
-            .parse::<f64>()
-            .map_err(|e| io::Error::other(format!("DMD area height: {e}")))?;
             Geometry {
-                playfield_w,
-                playfield_h,
-                dmd_area_h,
+                playfield_w: prompt_number("  playfield width (pixels)", 2560.0, interactive)?,
+                playfield_h: prompt_number("  playfield height (pixels)", 1440.0, interactive)?,
+                dmd_area_h: prompt_number(
+                    "  height of the B2S DMD area at the playfield bottom (ScreenRes.txt line 10, default 550)",
+                    550.0,
+                    interactive,
+                )?,
             }
         }
     };
-    let bg_w = prompt_line(
-        "  backglass screen width (pixels)",
-        Some("2560"),
-        interactive,
-    )?
-    .parse::<f64>()
-    .map_err(|e| io::Error::other(format!("backglass width: {e}")))?;
-    let bg_h = prompt_line(
-        "  backglass screen height (pixels)",
-        Some("2880"),
-        interactive,
-    )?
-    .parse::<f64>()
-    .map_err(|e| io::Error::other(format!("backglass height: {e}")))?;
+    let bg_w = prompt_number("  backglass screen width (pixels)", 2560.0, interactive)?;
+    let bg_h = prompt_number("  backglass screen height (pixels)", 2880.0, interactive)?;
 
     // ---- step 3: scan (hole detection + ini lookup)
     crate::println!("step 3: scanning tables (hole detection + ini lookup)")?;
