@@ -136,10 +136,12 @@ fn prompt_number(question: &str, default: f64, interactive: bool) -> io::Result<
         .map_err(|e| io::Error::other(format!("{question}: {answer:?} is not a number: {e}")))
 }
 
-/// The Visual Pinball executable, found by walking up from DmdDevice.ini:
-/// the ini lives in the VPinMAME folder of the install, and the exe in the
-/// install root. This is how a config file written on a machine with several
-/// vPinball folders gets the right one.
+/// The Visual Pinball executable, found by walking up from DmdDevice.ini.
+/// The ini lives in the VPinMAME folder of the install; the exe sits either
+/// in the install root, in the Baller installer's `Visual Pinball` (and
+/// `VisualPinball`) subfolder of it, or in any other direct subfolder of the
+/// root. Three levels up from the ini is the last folder examined, and at
+/// the root only its direct children - so a stray `D:\` is never walked.
 pub fn detect_vpx_executable(ini_path: &Path) -> Option<PathBuf> {
     const NAMES: [&str; 5] = [
         "VPinballX_64.exe",
@@ -148,13 +150,27 @@ pub fn detect_vpx_executable(ini_path: &Path) -> Option<PathBuf> {
         "VPinballX_GL",
         "vpinballx_gl",
     ];
+    let find = |dir: &Path| -> Option<PathBuf> {
+        NAMES
+            .iter()
+            .map(|name| dir.join(name))
+            .find(|candidate| candidate.is_file())
+    };
     let mut dir = ini_path.parent();
     let mut depth = 0;
     while let Some(d) = dir.filter(|_| depth < 4) {
-        for name in NAMES {
-            let candidate = d.join(name);
-            if candidate.is_file() {
-                return Some(candidate);
+        if let Some(exe) = find(d) {
+            return Some(exe);
+        }
+        // the Baller layout: <root>\Visual Pinball\VPinballX_64.exe - and
+        // any other one-level layout, so scan the direct subfolders
+        if depth >= 1
+            && let Ok(entries) = std::fs::read_dir(d)
+        {
+            for entry in entries.flatten() {
+                if let Some(exe) = find(&entry.path()) {
+                    return Some(exe);
+                }
             }
         }
         dir = d.parent();
