@@ -75,7 +75,7 @@ pub fn print(records: &[Record]) {
                 "  ini   {}\n",
                 match rec.ini_section {
                     true => format!(
-                        "[{}] {:.0},{:.0} {:.0}x{:.0}",
+                        "[{}] {:.0},{:.0} {:.0}x{:.0}  (monitor px)",
                         rec.rom.as_deref().unwrap_or("?"),
                         r.x,
                         r.y,
@@ -90,7 +90,7 @@ pub fn print(records: &[Record]) {
             }
             if let Some(m) = rec.ini_in_image {
                 out.push_str(&format!(
-                    "        mapped {:.0},{:.0} {:.0}x{:.0}\n",
+                    "        mapped {:.0},{:.0} {:.0}x{:.0}  (backglass px)\n",
                     m.x, m.y, m.w, m.h
                 ));
             }
