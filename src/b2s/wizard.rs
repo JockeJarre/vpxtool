@@ -51,12 +51,11 @@ pub struct Geometry {
 
 impl Geometry {
     pub fn monitor(&self, backglass_w: f64, backglass_h: f64) -> Rect {
-        Rect::new(
-            self.playfield_w,
-            self.playfield_h - self.dmd_area_h,
-            backglass_w,
-            backglass_h,
-        )
+        // the bottom edge of the backglass window sits as far below the
+        // playfield as the DMD strip is tall, so the strip lands under the
+        // playfield and the rest of the backglass rises over the desktop
+        let y1 = self.playfield_h + self.dmd_area_h;
+        Rect::new(self.playfield_w, y1 - backglass_h, backglass_w, backglass_h)
     }
 }
 
@@ -64,7 +63,7 @@ impl Geometry {
 /// installation, a user meets it in ScreenRes.txt and in the B2S Display
 /// Setup dialog, and the connection to the backglass position is the whole
 /// point of asking.
-const DMD_AREA_QUESTION: &str = "  the DMD strip that B2S draws on the playfield screen, the backglass top edge aligns with its top\n    (B2S Display Setup: DMD Area Height; ScreenRes.txt: \"width/height of the B2S (or Full) DMD area\", the second number; default 550)\n  strip height (pixels)";
+const DMD_AREA_QUESTION: &str = "  the DMD area: the strip at the bottom of the backglass image from which B2S renders the DMD, placed below the playfield\n    (ScreenRes.txt: \"width/height of the B2S (or Full) DMD area\", the second number; default 550)\n  area height (pixels)";
 
 /// The default B2S DMD area height in ScreenRes.txt.
 const DEFAULT_DMD_AREA_H: f64 = 550.0;
@@ -273,12 +272,12 @@ pub fn run(args: &WizardArgs) -> io::Result<()> {
     // ScreenRes.txt is a hint, not the answer: it says how big the playfield
     // is and how high the DMD area is, and the default arrangement of the
     // B2S wiki turns those into the backglass window - x0 = playfield width,
-    // y0 = playfield height - DMD height. The Windows monitor placement can
+    // y1 = playfield height + DMD area height. The Windows monitor placement can
     // say otherwise (a backglass monitor placed flush to the top of the
     // desktop has y0 = 0), so the candidate is verified against the tables
     // in step 4, and their own data corrects it.
     crate::println!(
-        "step 2: the screen setup (default B2S arrangement: backglass right of the playfield, its top lowered by the DMD area height)"
+        "step 2: the screen setup (default B2S arrangement: backglass right of the playfield, its bottom reaching dmd area height below the playfield)"
     )?;
     let screenres = match &args.target {
         Target::Directory(d) => Some(d.join("ScreenRes.txt")),
@@ -438,8 +437,9 @@ mod tests {
     #[test]
     fn the_default_setup_builds_the_monitor_from_the_screenres_numbers() {
         // a 2560x1440 playfield, the 550 DMD area, a 2560x2880 backglass:
-        // the wiki picture's layout, and the vpxtool default 2560,0 was the
-        // y0=0 simplification of it
+        // the wiki picture's layout. The bottom edge is 1440+550, the top
+        // edge is 2880 above that: -890, a monitor reaching over the top of
+        // the desktop, measured on a real cabinet as -846
         let g = Geometry {
             playfield_w: 2560.0,
             playfield_h: 1440.0,
@@ -447,7 +447,7 @@ mod tests {
         };
         assert_eq!(
             g.monitor(2560.0, 2880.0),
-            Rect::new(2560.0, 890.0, 2560.0, 2880.0)
+            Rect::new(2560.0, -890.0, 2560.0, 2880.0)
         );
     }
 

@@ -204,7 +204,8 @@ desktop coordinates of `DmdDevice.ini` into the backglass image needs the
 backglass monitor rectangle - where the backglass screen sits on the desktop
 right of the playfield. The wizard reads the playfield size and the DMD area
 height from `ScreenRes.txt` (the B2S default arrangement puts the backglass
-window right of the playfield, its top lowered by the DMD area height), asks
+window right of the playfield, its bottom reaching the DMD area height
+below the playfield), asks
 for what it cannot find, then *verifies* that candidate against your own
 tables: on every table with both a detected DMD window and an ini section,
 the median offset of the mapped ini rect to the detected window says where
