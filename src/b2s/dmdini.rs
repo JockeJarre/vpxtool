@@ -53,6 +53,18 @@ impl DmdDeviceIni {
 
     /// Merges `[global]` with every section named exactly `rom` (case
     /// insensitive, later sections override), like `GetPrivateProfileString`.
+    /// The DMD windows of all game sections ([global] merged in, sections
+    /// without complete coordinates skipped), for the wizard's plausibility
+    /// check: every ini window has to fit inside the backglass monitor.
+    pub fn window_rects(&self) -> Vec<crate::b2s::Rect> {
+        self.sections
+            .iter()
+            .map(|(name, _)| name.clone())
+            .filter(|name| !name.eq_ignore_ascii_case("global"))
+            .filter_map(|name| self.lookup(&name).rect())
+            .collect()
+    }
+
     pub fn lookup(&self, rom: &str) -> VirtualDmd {
         let mut merged: Vec<(String, String)> = Vec::new();
         let mut section_found = false;

@@ -208,7 +208,14 @@ the playfield, x0 = playfield width, y0 = 0), asks for the position of the
 backglass window - the one number no file contains - and for the screen
 sizes; the V6 `ScreenRes.txt` states the backglass window size in the ini's
 space and is used as the default there, and all numbers are only the
-defaults of the questions - and then
+defaults of the questions. Anything fishy with the answers is asked about:
+values out of range, answers that disagree with `ScreenRes.txt`, an ini with
+two sections, and - the strongest check - the ini's own DMD windows: with
+the right monitor almost all of them fit inside it, with a wrong one almost
+none do, and a majority falling outside is reported before the scan. When
+the scan starts, all answers are saved to the config
+(`b2s_dmddevice_ini`, `b2s_screenres`, `b2s_playfield_width`) and are the
+defaults of the next run. Then
 *verifies* the candidate against your own tables: on every table with both a
 detected DMD window and an ini section, the median offset of the mapped ini
 rect to the detected window says where the candidate is wrong, and the

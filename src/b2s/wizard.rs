@@ -235,6 +235,79 @@ fn parse_xy(text: &str) -> Option<(f64, f64)> {
     Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
 }
 
+/// Values that do not hang together, in words. All of it is computable
+/// from the two files the wizard feeds on: every ini window must fit
+/// inside the backglass monitor (the ini coords are desktop pixels of that
+/// monitor's space), sizes must be in a plausible range, an ini with two
+/// sections is probably the wrong file, and answers that disagree with
+/// ScreenRes.txt mean one of the two is stale.
+fn sanity_problems(
+    x: f64,
+    y: f64,
+    bg_w: f64,
+    bg_h: f64,
+    pf_w: f64,
+    ini: &DmdDeviceIni,
+    screenres: Option<ScreenResInfo>,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    let sane = |n: f64| (32.0..=16384.0).contains(&n);
+    for (what, n) in [
+        ("playfield width", pf_w),
+        ("backglass width", bg_w),
+        ("backglass height", bg_h),
+    ] {
+        if !sane(n) {
+            out.push(format!("{what} {n:.0} px is outside the 32..16384 range"));
+        }
+    }
+    if x.abs() > 32768.0 || y.abs() > 32768.0 {
+        out.push(format!(
+            "position {x:.0},{y:.0} is outside the +-32768 range"
+        ));
+    }
+    if ini.section_count() < 5 {
+        out.push(format!(
+            "the ini has only {} sections - the right file?",
+            ini.section_count()
+        ));
+    }
+    // every ini window sits on the backglass monitor - in real files a few
+    // are dragged off to other screens, so the check is the majority: with
+    // the right monitor almost all windows fit, with a wrong one almost
+    // none do (measured on a real cabinet: 5 % against 96 %)
+    let rects = ini.window_rects();
+    if rects.len() >= 8 {
+        // a hair of tolerance: the windows sit inside the monitor with a few
+        // pixels to spare at most edges, title bars do not reach exactly
+        let (mx, my) = (0.02 * bg_w, 0.02 * bg_h);
+        let outside = rects
+            .iter()
+            .filter(|r| {
+                r.x < x - mx
+                    || r.x + r.w > x + bg_w + mx
+                    || r.y < y - my
+                    || r.y + r.h > y + bg_h + my
+            })
+            .count();
+        if outside * 5 > rects.len() {
+            out.push(format!(
+                "{outside} of {} ini DMD windows fall outside the backglass monitor {x:.0},{y:.0},{bg_w:.0}x{bg_h:.0} - check the position and the sizes",
+                rects.len()
+            ));
+        }
+    }
+    if let Some(sr) = screenres
+        && let Some((w, h)) = sr.backglass
+        && ((bg_w - w).abs() > 0.2 * w || (bg_h - h).abs() > 0.2 * h)
+    {
+        out.push(format!(
+            "ScreenRes.txt says {w:.0}x{h:.0}, the answers say {bg_w:.0}x{bg_h:.0} - one of the two is stale"
+        ));
+    }
+    out
+}
+
 fn median(values: &[f64]) -> f64 {
     let mut v = values.to_vec();
     v.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -297,9 +370,16 @@ fn rect_string(r: &Rect) -> String {
 pub fn run(args: &WizardArgs) -> io::Result<()> {
     let interactive = std::io::stdin().is_terminal() && !args.yes;
 
+    // the previous run's answers are the defaults of this one
+    let answers = crate::config::b2s_answers()?;
+
     // ---- step 1: DmdDevice.ini
     crate::println!("step 1: DmdDevice.ini")?;
-    let found = args.ini.clone().unwrap_or_else(|| super::default_ini(&[]));
+    let found = args
+        .ini
+        .clone()
+        .or_else(|| answers.ini.clone().filter(|p| p.is_file()))
+        .unwrap_or_else(|| super::default_ini(&[]));
     crate::println!("  candidate: {}", found.display())?;
     let answer = prompt_line(
         "  path of DmdDevice.ini",
@@ -330,7 +410,8 @@ pub fn run(args: &WizardArgs) -> io::Result<()> {
         Target::Directory(d) => Some(d.join("ScreenRes.txt")),
         _ => None,
     }
-    .filter(|p| p.is_file());
+    .filter(|p| p.is_file())
+    .or_else(|| answers.screenres.clone().filter(|p| p.is_file()));
     // the file sits with the B2S server, not necessarily with the tables -
     // so it is asked for, with what was found as the default
     match &found {
@@ -380,41 +461,98 @@ pub fn run(args: &WizardArgs) -> io::Result<()> {
     // so its numbers are the defaults of the questions, not the answers
     // the sizes come from ScreenRes.txt, the position is the one number no
     // file has - so it is asked, with the default arrangement as its default
-    let playfield_w = prompt_number(
+    let saved_monitor = answers
+        .monitor
+        .as_deref()
+        .and_then(|s| s.parse::<Rect>().ok());
+    let mut playfield_w = prompt_number(
         "  playfield screen width (pixels): the default arrangement starts the backglass at this x",
-        screenres_info.map(|i| i.playfield_w).unwrap_or(2560.0),
+        screenres_info
+            .map(|i| i.playfield_w)
+            .or_else(|| answers.playfield_w.map(|w| w as f64))
+            .unwrap_or(2560.0),
         interactive,
     )?;
-    let bg_w = prompt_number(
+    let mut bg_w = prompt_number(
         "  backglass screen width (pixels)",
         screenres_info
             .and_then(|i| i.backglass)
             .map(|(w, _)| w)
+            .or_else(|| saved_monitor.map(|m| m.w))
             .unwrap_or(2560.0),
         interactive,
     )?;
-    let bg_h = prompt_number(
+    let mut bg_h = prompt_number(
         "  backglass screen height (pixels)",
         screenres_info
             .and_then(|i| i.backglass)
             .map(|(_, h)| h)
+            .or_else(|| saved_monitor.map(|m| m.h))
             .unwrap_or(2880.0),
         interactive,
     )?;
-    let position = prompt_line(
+    let mut position = prompt_line(
         "  backglass window position on the desktop, x,y (Windows display placement, negative allowed)",
-        Some(&format!("{playfield_w:.0},0")),
+        Some(
+            &saved_monitor
+                .map(|m| format!("{:.0},{:.0}", m.x, m.y))
+                .unwrap_or_else(|| format!("{playfield_w:.0},0")),
+        ),
         interactive,
     )?;
-    let (x, y) = parse_xy(&position).ok_or_else(|| {
+    let (mut x, mut y) = parse_xy(&position).ok_or_else(|| {
         io::Error::other(format!(
             "not a position: {position} - expected two numbers, x,y"
         ))
     })?;
+    // everything that looks fishy gets asked about, with the current values
+    // as the defaults of the second round
+    loop {
+        let problems = sanity_problems(x, y, bg_w, bg_h, playfield_w, &ini, screenres_info);
+        if problems.is_empty() {
+            break;
+        }
+        for p in &problems {
+            crate::println!("    check: {p}")?;
+        }
+        if confirm("  the values look off, keep them anyway", interactive)? {
+            break;
+        }
+        playfield_w = prompt_number(
+            "  playfield screen width (pixels)",
+            playfield_w,
+            interactive,
+        )?;
+        bg_w = prompt_number("  backglass screen width (pixels)", bg_w, interactive)?;
+        bg_h = prompt_number("  backglass screen height (pixels)", bg_h, interactive)?;
+        position = prompt_line(
+            "  backglass window position on the desktop, x,y",
+            Some(&format!("{x:.0},{y:.0}")),
+            interactive,
+        )?;
+        let (nx, ny) = parse_xy(&position).ok_or_else(|| {
+            io::Error::other(format!(
+                "not a position: {position} - expected two numbers, x,y"
+            ))
+        })?;
+        x = nx;
+        y = ny;
+    }
     let geometry = Geometry { x, y };
 
     // ---- step 3: scan (hole detection + ini lookup)
     crate::println!("step 3: scanning tables (hole detection + ini lookup)")?;
+    // the answers are saved now, before the long part: the next wizard run
+    // starts from them, and an interrupted scan is not starting over
+    let vpx = detect_vpx_executable(&ini_path);
+    crate::config::set_b2s_answers(
+        Some(&ini_path),
+        screenres.as_deref(),
+        Some(playfield_w as i64),
+        &rect_string(&geometry.monitor(bg_w, bg_h)),
+        vpx.as_deref(),
+    )?;
+    crate::println!("  answers saved to the vpxtool config")?;
     let records = super::scan::scan_quiet(ScanArgs {
         target: args.target.clone(),
         ini: Some(ini_path.clone()),
@@ -528,11 +666,7 @@ pub fn run(args: &WizardArgs) -> io::Result<()> {
         )?;
         return Ok(());
     }
-    let vpx = detect_vpx_executable(&ini_path);
-    if let Some(exe) = &vpx {
-        crate::println!("  vpx_executable for the config: {}", exe.display())?;
-    }
-    let path = crate::config::set_b2s_backglass_monitor(&rect_string(&monitor), vpx.as_deref())?;
+    let path = crate::config::set_b2s_answers(None, None, None, &rect_string(&monitor), None)?;
     crate::println!(
         "step 5: wrote b2s_backglass_monitor = \"{}\" to {}",
         rect_string(&monitor),
@@ -622,6 +756,107 @@ mod tests {
         assert_eq!(parse_xy(" 1283 , -846 "), Some((1283.0, -846.0)));
         assert_eq!(parse_xy("3840"), None);
         assert_eq!(parse_xy("a,b"), None);
+    }
+
+    fn ini_fixture(dir: &Path, name: &str, sections: &str) -> DmdDeviceIni {
+        let path = dir.join(name);
+        std::fs::write(&path, sections).unwrap();
+        DmdDeviceIni::load(&path).unwrap()
+    }
+
+    const TWO_WINDOWS: &str = "[a]
+virtualdmd left=2700
+virtualdmd top=100
+             virtualdmd width=1000
+virtualdmd height=200
+             [b]
+virtualdmd left=4300
+virtualdmd top=2500
+             virtualdmd width=800
+virtualdmd height=300
+";
+
+    #[test]
+    fn ini_windows_that_do_not_fit_the_monitor_are_a_problem() {
+        let dir = std::env::temp_dir().join("vpxtool-sanity-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let ini = ini_fixture(&dir, "two.ini", TWO_WINDOWS);
+        // x 2700..5100, y 100..2800: a monitor at 2560,0,2560,2880 holds it
+        let ok = sanity_problems(2560.0, 0.0, 2560.0, 2880.0, 2560.0, &ini, None);
+        assert!(!ok.iter().any(|p| p.contains("do not fit")), "{ok:?}");
+        // a two section ini is fishy on its own
+        assert!(ok.iter().any(|p| p.contains("only 2 sections")));
+        // at 0,0 the windows hang past both edges; the two-section ini is
+        // below the majority check's floor, so this one is a small fixture
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_ini_window_majority_judges_the_monitor() {
+        let dir = std::env::temp_dir().join("vpxtool-sanity-majority-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // nine windows on the monitor at 2560,0,2560,2880, one dragged away
+        let many = (0..9)
+            .map(|i| {
+                format!(
+                    "[r{i}]
+virtualdmd left=2700
+virtualdmd top=100
+                     virtualdmd width=1000
+virtualdmd height=200
+"
+                )
+            })
+            .collect::<String>()
+            + "[far]
+virtualdmd left=9000
+virtualdmd top=100
+               virtualdmd width=1000
+virtualdmd height=200
+";
+        let ini = ini_fixture(&dir, "many.ini", &many);
+        let ok = sanity_problems(2560.0, 0.0, 2560.0, 2880.0, 2560.0, &ini, None);
+        assert!(!ok.iter().any(|p| p.contains("fall outside")), "{ok:?}");
+        let bad = sanity_problems(0.0, 0.0, 2560.0, 1440.0, 2560.0, &ini, None);
+        assert!(bad.iter().any(|p| p.contains("10 of 10")), "{bad:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn answers_that_disagree_with_the_screenres_are_a_problem() {
+        let dir = std::env::temp_dir().join("vpxtool-sanity-stale-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let many = (0..6)
+            .map(|i| {
+                format!(
+                    "[r{i}]
+virtualdmd left=2700
+virtualdmd top=100
+                     virtualdmd width=1000
+virtualdmd height=200
+"
+                )
+            })
+            .collect::<String>();
+        let ini = ini_fixture(&dir, "many.ini", &many);
+        let sr = ScreenResInfo {
+            playfield_w: 2560.0,
+            playfield_h: 1440.0,
+            backglass: Some((2560.0, 2880.0)),
+        };
+        // the physical panel size, not the ini's size: more than 20% off
+        let problems = sanity_problems(2560.0, 0.0, 1707.0, 1920.0, 2560.0, &ini, Some(sr));
+        assert!(
+            problems.iter().any(|p| p.contains("ScreenRes")),
+            "{problems:?}"
+        );
+        // agreeing is silent
+        let quiet = sanity_problems(2560.0, 0.0, 2560.0, 2880.0, 2560.0, &ini, Some(sr));
+        assert!(!quiet.iter().any(|p| p.contains("ScreenRes")), "{quiet:?}");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

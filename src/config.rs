@@ -48,6 +48,11 @@ pub struct Config {
     /// backglass image with it, so it must say where the backglass monitor
     /// sits next to the playfield monitor, e.g. `3840,0,2560,2880`.
     pub b2s_backglass_monitor: Option<String>,
+    /// the b2s wizard's saved answers, the defaults of the next run: the
+    /// DmdDevice.ini and ScreenRes.txt it read, the playfield width
+    pub b2s_dmddevice_ini: Option<String>,
+    pub b2s_screenres: Option<String>,
+    pub b2s_playfield_width: Option<i64>,
 }
 
 #[derive(PartialEq, Debug, Clone)]
@@ -63,6 +68,11 @@ pub struct ResolvedConfig {
     pub vpxz_excludes: Vec<String>,
     pub menu_keys: KeyMap,
     pub b2s_backglass_monitor: Option<String>,
+    /// the b2s wizard's saved answers, the defaults of the next run: the
+    /// DmdDevice.ini and ScreenRes.txt it read, the playfield width
+    pub b2s_dmddevice_ini: Option<String>,
+    pub b2s_screenres: Option<String>,
+    pub b2s_playfield_width: Option<i64>,
 }
 
 pub fn default_vpxz_excludes() -> Vec<String> {
@@ -144,8 +154,55 @@ impl ResolvedConfig {
 
 /// Sets `b2s_backglass_monitor` in the vpxtool config file, keeping the
 /// rest of the file. The wizard writes the monitor it measured.
-pub fn set_b2s_backglass_monitor(
-    value: &str,
+/// The wizard's persisted answers.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct B2sAnswers {
+    pub ini: Option<PathBuf>,
+    pub screenres: Option<PathBuf>,
+    pub playfield_w: Option<i64>,
+    pub monitor: Option<String>,
+}
+
+pub fn b2s_answers() -> io::Result<B2sAnswers> {
+    let Some((_, config)) = load_config()? else {
+        return Ok(B2sAnswers::default());
+    };
+    Ok(B2sAnswers {
+        ini: config.b2s_dmddevice_ini.as_ref().map(PathBuf::from),
+        screenres: config.b2s_screenres.as_ref().map(PathBuf::from),
+        playfield_w: config.b2s_playfield_width,
+        monitor: config.b2s_backglass_monitor,
+    })
+}
+
+/// Parses the config file as a document. Not `text.parse::<toml::Value>()`:
+/// that parses a bare TOML value, and the first `key = value` line of a
+/// real config dies on it with "unexpected content, expected nothing".
+fn parse_config_doc(text: &str, path: &Path) -> io::Result<toml::Table> {
+    if text.trim().is_empty() {
+        return Ok(toml::Table::new());
+    }
+    toml::from_str::<toml::Value>(text)
+        .map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("parse {}: {e}", path.display()),
+            )
+        })?
+        .try_into()
+        .map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{}: top level is not a table", path.display()),
+            )
+        })
+}
+
+pub fn set_b2s_answers(
+    ini: Option<&Path>,
+    screenres: Option<&Path>,
+    playfield_w: Option<i64>,
+    monitor: &str,
     vpx_executable: Option<&Path>,
 ) -> io::Result<PathBuf> {
     // an existing file wins; a fresh one goes to the home configuration path
@@ -153,28 +210,28 @@ pub fn set_b2s_backglass_monitor(
     let text = std::fs::read_to_string(&path).unwrap_or_default();
     // the file is kept as a document, so comments, key order and keys that
     // this version of vpxtool does not know survive the edit
-    let mut doc: toml::Table = if text.trim().is_empty() {
-        toml::Table::new()
-    } else {
-        text.parse::<toml::Value>()
-            .map_err(|e| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("parse {}: {e}", path.display()),
-                )
-            })?
-            .try_into()
-            .map_err(|_| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("{}: top level is not a table", path.display()),
-                )
-            })?
-    };
+    let mut doc = parse_config_doc(&text, &path)?;
     doc.insert(
         "b2s_backglass_monitor".to_string(),
-        toml::Value::String(value.to_string()),
+        toml::Value::String(monitor.to_string()),
     );
+    // the wizard's other answers, kept as the defaults of the next run;
+    // keys that are not given keep their previous value
+    for (key, value) in [
+        (
+            "b2s_dmddevice_ini",
+            ini.map(|p| toml::Value::String(p.to_string_lossy().into_owned())),
+        ),
+        (
+            "b2s_screenres",
+            screenres.map(|p| toml::Value::String(p.to_string_lossy().into_owned())),
+        ),
+        ("b2s_playfield_width", playfield_w.map(toml::Value::Integer)),
+    ] {
+        if let Some(value) = value {
+            doc.insert(key.to_string(), value);
+        }
+    }
     // the one required key: an existing file keeps its value, a fresh one
     // gets the detected install, and only as a last resort the empty string
     // (load_config requires the key; the defaults tolerate an empty value)
@@ -314,6 +371,9 @@ fn read_config(config_path: &Path) -> io::Result<ResolvedConfig> {
         vpxz_excludes: config.vpxz_excludes.unwrap_or_else(default_vpxz_excludes),
         menu_keys,
         b2s_backglass_monitor: config.b2s_backglass_monitor,
+        b2s_dmddevice_ini: config.b2s_dmddevice_ini,
+        b2s_screenres: config.b2s_screenres,
+        b2s_playfield_width: config.b2s_playfield_width,
     };
     Ok(resolved_config)
 }
@@ -556,6 +616,9 @@ fn write_default_config(config_file: &Path, vpx_executable: &Path) -> io::Result
         vpxz_excludes: None,
         frontend: None,
         b2s_backglass_monitor: None,
+        b2s_dmddevice_ini: None,
+        b2s_screenres: None,
+        b2s_playfield_width: None,
     };
     write_config(config_file, &config)?;
     Ok(())
@@ -642,6 +705,9 @@ mod tests {
             vpxz_excludes: vec![],
             menu_keys: KeyMap::default(),
             b2s_backglass_monitor: None,
+            b2s_dmddevice_ini: None,
+            b2s_screenres: None,
+            b2s_playfield_width: None,
         }
     }
 
@@ -736,8 +802,27 @@ mod tests {
                 vpxz_excludes: default_vpxz_excludes(),
                 menu_keys: KeyMap::default(),
                 b2s_backglass_monitor: None,
+                b2s_dmddevice_ini: None,
+                b2s_screenres: None,
+                b2s_playfield_width: None,
             }
         );
+        Ok(())
+    }
+
+    #[test]
+    fn a_written_config_survives_the_edit_that_wrote_it() -> io::Result<()> {
+        // the wizard's second run edits the file its first run wrote; the
+        // document parse must eat `key = value` lines, not only bare values
+        let doc = parse_config_doc(
+            "b2s_backglass_monitor = \"2560,0,2560,2880\"\nvpx_executable = \"D:\\\\vPinball\\\\VPinballX_64.exe\"\n",
+            Path::new("vpxtool.cfg"),
+        )?;
+        assert_eq!(
+            doc.get("b2s_backglass_monitor").and_then(|v| v.as_str()),
+            Some("2560,0,2560,2880")
+        );
+        assert!(doc.contains_key("vpx_executable"));
         Ok(())
     }
 
@@ -865,6 +950,9 @@ mod tests {
                 vpxz_excludes: default_vpxz_excludes(),
                 menu_keys: KeyMap::default(),
                 b2s_backglass_monitor: None,
+                b2s_dmddevice_ini: None,
+                b2s_screenres: None,
+                b2s_playfield_width: None,
             }
         );
         Ok(())
@@ -904,6 +992,9 @@ mod tests {
                 vpxz_excludes: default_vpxz_excludes(),
                 menu_keys: KeyMap::default(),
                 b2s_backglass_monitor: None,
+                b2s_dmddevice_ini: None,
+                b2s_screenres: None,
+                b2s_playfield_width: None,
             }
         );
         Ok(())
@@ -1045,6 +1136,9 @@ tables_scan_max_depth = 2
             vpxz_excludes: default_vpxz_excludes(),
             menu_keys: KeyMap::default(),
             b2s_backglass_monitor: None,
+            b2s_dmddevice_ini: None,
+            b2s_screenres: None,
+            b2s_playfield_width: None,
         };
 
         // Must not panic; the broken ini is treated as unparseable.
@@ -1080,6 +1174,9 @@ tables_scan_max_depth = 2
             vpxz_excludes: default_vpxz_excludes(),
             menu_keys: KeyMap::default(),
             b2s_backglass_monitor: None,
+            b2s_dmddevice_ini: None,
+            b2s_screenres: None,
+            b2s_playfield_width: None,
         };
 
         assert_eq!(

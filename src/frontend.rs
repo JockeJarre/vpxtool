@@ -1324,6 +1324,9 @@ mod tests {
             vpxz_excludes: vec![],
             menu_keys: KeyMap::default(),
             b2s_backglass_monitor: None,
+            b2s_dmddevice_ini: None,
+            b2s_screenres: None,
+            b2s_playfield_width: None,
         };
         let labels: Vec<String> = TableOption::template_ini_options(&config)
             .iter()
