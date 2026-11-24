@@ -204,11 +204,14 @@ desktop coordinates of `DmdDevice.ini` into the backglass image needs the
 backglass monitor rectangle - where the backglass screen sits on the desktop.
 No file knows that: it is Windows display placement, negative coordinates
 included. The wizard starts from the default arrangement (backglass right of
-the playfield, x0 = playfield width, y0 = 0), asks for the position of the
-backglass window - the one number no file contains - and for the screen
-sizes; the V6 `ScreenRes.txt` states the backglass window size in the ini's
-space and is used as the default there, and all numbers are only the
-defaults of the questions. Anything fishy with the answers is asked about:
+the playfield, x0 = playfield width, y0 = 0), asks for the
+**scaling of the backglass monitor** and then for the size and position **as
+the Windows display settings show them** - physical pixels - and multiplies
+them by the scaling into the space of the ini coordinates, where the B2S
+server, vpinmame and DmdDevice.ini live: a 1707x1920 panel at 150% becomes
+2560x2880 at 3840,0. A 100% setup answers what it sees, unchanged. The V6
+`ScreenRes.txt` states the backglass size in the scaled space and is divided
+back into the physical default of the question. Anything fishy with the answers is asked about:
 values out of range, answers that disagree with `ScreenRes.txt`, an ini with
 two sections, and - the strongest check - the ini's own DMD windows: with
 the right monitor almost all of them fit inside it, with a wrong one almost

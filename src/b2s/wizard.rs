@@ -301,9 +301,21 @@ fn sanity_problems(
         && let Some((w, h)) = sr.backglass
         && ((bg_w - w).abs() > 0.2 * w || (bg_h - h).abs() > 0.2 * h)
     {
-        out.push(format!(
-            "ScreenRes.txt says {w:.0}x{h:.0}, the answers say {bg_w:.0}x{bg_h:.0} - one of the two is stale"
-        ));
+        // a clean ratio is not staleness, it is the display scaling: the
+        // answer is the physical panel, ScreenRes.txt and the ini live in
+        // the scaled space - say so in numbers, it is the one confusion
+        // this wizard keeps running into
+        let (rx, ry) = (w / bg_w, h / bg_h);
+        if (rx - ry).abs() < 0.03 && (1.05..2.6).contains(&rx) {
+            out.push(format!(
+                "ScreenRes.txt says {w:.0}x{h:.0} and the answers {bg_w:.0}x{bg_h:.0} differ by a ratio of {:.0}%: that is the display scaling - the panel is {bg_w:.0}x{bg_h:.0} physical pixels, and the B2S server, vpinmame and DmdDevice.ini run in the scaled space, where it is {w:.0}x{h:.0}; answer the scaled size, and multiply the position by the same ratio",
+                rx * 100.0
+            ));
+        } else {
+            out.push(format!(
+                "ScreenRes.txt says {w:.0}x{h:.0}, the answers say {bg_w:.0}x{bg_h:.0} - one of the two is stale"
+            ));
+        }
     }
     out
 }
@@ -464,7 +476,25 @@ pub fn run(args: &WizardArgs) -> io::Result<()> {
     let saved_monitor = answers
         .monitor
         .as_deref()
-        .and_then(|s| s.parse::<Rect>().ok());
+        .and_then(|t| t.parse::<Rect>().ok());
+    // the one question that unlocks all the other numbers: every size and
+    // position in the Windows display settings is physical pixels, while
+    // the B2S server, vpinmame and DmdDevice.ini run in the scaled space.
+    // The answers are taken in physical pixels and multiplied by the
+    // scaling into the space the ini lives in.
+    let mut scaling = prompt_number(
+        "  scaling of the backglass monitor in percent, from the Windows display settings (150 for 150%)",
+        answers.scaling.map(|v| v as f64).unwrap_or(100.0),
+        interactive,
+    )?;
+    if !(25.0..=400.0).contains(&scaling) {
+        return Err(io::Error::other(format!(
+            "scaling {scaling:.0}% is outside the 25..400 range"
+        )));
+    }
+    let mut scale = scaling / 100.0;
+    // the playfield is taken as 100%: it is the primary monitor, and the
+    // scaled desktop is anchored at its top left corner
     let mut playfield_w = prompt_number(
         "  playfield screen width (pixels): the default arrangement starts the backglass at this x",
         screenres_info
@@ -473,61 +503,96 @@ pub fn run(args: &WizardArgs) -> io::Result<()> {
             .unwrap_or(2560.0),
         interactive,
     )?;
+    // ScreenRes.txt states the scaled size, the saved monitor is scaled
+    // too: both are divided back into the physical numbers of the settings
     let mut bg_w = prompt_number(
-        "  backglass screen width (pixels)",
+        "  backglass screen width in the display settings (physical pixels)",
         screenres_info
             .and_then(|i| i.backglass)
             .map(|(w, _)| w)
             .or_else(|| saved_monitor.map(|m| m.w))
-            .unwrap_or(2560.0),
+            .unwrap_or(2560.0)
+            / scale,
         interactive,
     )?;
     let mut bg_h = prompt_number(
-        "  backglass screen height (pixels)",
+        "  backglass screen height in the display settings (physical pixels)",
         screenres_info
             .and_then(|i| i.backglass)
             .map(|(_, h)| h)
             .or_else(|| saved_monitor.map(|m| m.h))
-            .unwrap_or(2880.0),
+            .unwrap_or(2880.0)
+            / scale,
         interactive,
     )?;
     let mut position = prompt_line(
-        "  backglass window position on the desktop, x,y (Windows display placement, negative allowed)",
+        "  backglass window position as the display settings show it, x,y (physical pixels, negative allowed)",
         Some(
             &saved_monitor
-                .map(|m| format!("{:.0},{:.0}", m.x, m.y))
+                .map(|m| format!("{:.0},{:.0}", m.x / scale, m.y / scale))
                 .unwrap_or_else(|| format!("{playfield_w:.0},0")),
         ),
         interactive,
     )?;
-    let (mut x, mut y) = parse_xy(&position).ok_or_else(|| {
+    let (mut px, mut py) = parse_xy(&position).ok_or_else(|| {
         io::Error::other(format!(
             "not a position: {position} - expected two numbers, x,y"
         ))
     })?;
     // everything that looks fishy gets asked about, with the current values
-    // as the defaults of the second round
+    // as the defaults of the second round; the checks run on the computed
+    // ini-space rectangle
     loop {
-        let problems = sanity_problems(x, y, bg_w, bg_h, playfield_w, &ini, screenres_info);
+        let problems = sanity_problems(
+            px * scale,
+            py * scale,
+            bg_w * scale,
+            bg_h * scale,
+            playfield_w,
+            &ini,
+            screenres_info,
+        );
         if problems.is_empty() {
             break;
         }
         for p in &problems {
             crate::println!("    check: {p}")?;
         }
+        crate::println!(
+            "  the numbers are multiplied by the scaling ({scaling:.0}%) into the ini's space; a wrong scaling explains a lot: the display settings show physical pixels, the ini lives in the scaled ones"
+        )?;
         if confirm("  the values look off, keep them anyway", interactive)? {
             break;
+        }
+        let scaling_new = prompt_number(
+            "  scaling of the backglass monitor in percent",
+            scaling,
+            interactive,
+        )?;
+        if (25.0..=400.0).contains(&scaling_new) {
+            scaling = scaling_new;
+            scale = scaling / 100.0;
+        } else {
+            crate::println!("  keeping {scaling:.0}%: {scaling_new:.0}% is outside 25..400")?;
         }
         playfield_w = prompt_number(
             "  playfield screen width (pixels)",
             playfield_w,
             interactive,
         )?;
-        bg_w = prompt_number("  backglass screen width (pixels)", bg_w, interactive)?;
-        bg_h = prompt_number("  backglass screen height (pixels)", bg_h, interactive)?;
+        bg_w = prompt_number(
+            "  backglass screen width (physical pixels)",
+            bg_w,
+            interactive,
+        )?;
+        bg_h = prompt_number(
+            "  backglass screen height (physical pixels)",
+            bg_h,
+            interactive,
+        )?;
         position = prompt_line(
-            "  backglass window position on the desktop, x,y",
-            Some(&format!("{x:.0},{y:.0}")),
+            "  backglass window position, x,y (physical pixels)",
+            Some(&format!("{px:.0},{py:.0}")),
             interactive,
         )?;
         let (nx, ny) = parse_xy(&position).ok_or_else(|| {
@@ -535,23 +600,35 @@ pub fn run(args: &WizardArgs) -> io::Result<()> {
                 "not a position: {position} - expected two numbers, x,y"
             ))
         })?;
-        x = nx;
-        y = ny;
+        px = nx;
+        py = ny;
     }
-    let geometry = Geometry { x, y };
+    // the answers in the ini's space: physical pixels times the scaling,
+    // the space of the desktop the ini, B2S and vpinmame see
+    let bg_w = bg_w * scale;
+    let bg_h = bg_h * scale;
+    let geometry = Geometry {
+        x: px * scale,
+        y: py * scale,
+    };
+    crate::println!(
+        "  in the ini's space: {}",
+        rect_string(&geometry.monitor(bg_w, bg_h))
+    )?;
 
     // ---- step 3: scan (hole detection + ini lookup)
     crate::println!("step 3: scanning tables (hole detection + ini lookup)")?;
     // the answers are saved now, before the long part: the next wizard run
     // starts from them, and an interrupted scan is not starting over
     let vpx = detect_vpx_executable(&ini_path);
-    crate::config::set_b2s_answers(
-        Some(&ini_path),
-        screenres.as_deref(),
-        Some(playfield_w as i64),
-        &rect_string(&geometry.monitor(bg_w, bg_h)),
-        vpx.as_deref(),
-    )?;
+    crate::config::set_b2s_answers(&crate::config::B2sAnswersInput {
+        ini: Some(&ini_path),
+        screenres: screenres.as_deref(),
+        playfield_w: Some(playfield_w as i64),
+        scaling: Some(scaling as i64),
+        monitor: Some(&rect_string(&geometry.monitor(bg_w, bg_h))),
+        vpx_executable: vpx.as_deref(),
+    })?;
     crate::println!("  answers saved to the vpxtool config")?;
     let records = super::scan::scan_quiet(ScanArgs {
         target: args.target.clone(),
@@ -666,7 +743,10 @@ pub fn run(args: &WizardArgs) -> io::Result<()> {
         )?;
         return Ok(());
     }
-    let path = crate::config::set_b2s_answers(None, None, None, &rect_string(&monitor), None)?;
+    let path = crate::config::set_b2s_answers(&crate::config::B2sAnswersInput {
+        monitor: Some(&rect_string(&monitor)),
+        ..Default::default()
+    })?;
     crate::println!(
         "step 5: wrote b2s_backglass_monitor = \"{}\" to {}",
         rect_string(&monitor),

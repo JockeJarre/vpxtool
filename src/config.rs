@@ -53,6 +53,9 @@ pub struct Config {
     pub b2s_dmddevice_ini: Option<String>,
     pub b2s_screenres: Option<String>,
     pub b2s_playfield_width: Option<i64>,
+    /// the backglass monitor's display scaling in percent, as the wizard
+    /// asks it; the ini's space is the physical size and position times it
+    pub b2s_scaling: Option<i64>,
 }
 
 #[derive(PartialEq, Debug, Clone)]
@@ -73,6 +76,9 @@ pub struct ResolvedConfig {
     pub b2s_dmddevice_ini: Option<String>,
     pub b2s_screenres: Option<String>,
     pub b2s_playfield_width: Option<i64>,
+    /// the backglass monitor's display scaling in percent, as the wizard
+    /// asks it; the ini's space is the physical size and position times it
+    pub b2s_scaling: Option<i64>,
 }
 
 pub fn default_vpxz_excludes() -> Vec<String> {
@@ -160,6 +166,7 @@ pub struct B2sAnswers {
     pub ini: Option<PathBuf>,
     pub screenres: Option<PathBuf>,
     pub playfield_w: Option<i64>,
+    pub scaling: Option<i64>,
     pub monitor: Option<String>,
 }
 
@@ -176,6 +183,7 @@ pub fn b2s_answers() -> B2sAnswers {
         ini: config.b2s_dmddevice_ini.as_ref().map(PathBuf::from),
         screenres: config.b2s_screenres.as_ref().map(PathBuf::from),
         playfield_w: config.b2s_playfield_width,
+        scaling: config.b2s_scaling,
         monitor: config.b2s_backglass_monitor,
     }
 }
@@ -203,13 +211,21 @@ fn parse_config_doc(text: &str, path: &Path) -> io::Result<toml::Table> {
         })
 }
 
-pub fn set_b2s_answers(
-    ini: Option<&Path>,
-    screenres: Option<&Path>,
-    playfield_w: Option<i64>,
-    monitor: &str,
-    vpx_executable: Option<&Path>,
-) -> io::Result<PathBuf> {
+/// The wizard's answers to persist; keys left as None keep their old value.
+#[derive(Default)]
+pub struct B2sAnswersInput<'a> {
+    pub ini: Option<&'a Path>,
+    pub screenres: Option<&'a Path>,
+    pub playfield_w: Option<i64>,
+    pub scaling: Option<i64>,
+    pub monitor: Option<&'a str>,
+    pub vpx_executable: Option<&'a Path>,
+}
+
+pub fn set_b2s_answers(a: &B2sAnswersInput<'_>) -> io::Result<PathBuf> {
+    let ini = a.ini;
+    let screenres = a.screenres;
+    let playfield_w = a.playfield_w;
     // an existing file wins; a fresh one goes to the home configuration path
     let path = config_path().unwrap_or_else(home_config_path);
     let text = std::fs::read_to_string(&path).unwrap_or_default();
@@ -217,10 +233,15 @@ pub fn set_b2s_answers(
     // version of vpxtool does not know survive the edit; comments do not -
     // the round trip is through parsed values, not through toml_edit
     let mut doc = parse_config_doc(&text, &path)?;
-    doc.insert(
-        "b2s_backglass_monitor".to_string(),
-        toml::Value::String(monitor.to_string()),
-    );
+    if let Some(monitor) = a.monitor {
+        doc.insert(
+            "b2s_backglass_monitor".to_string(),
+            toml::Value::String(monitor.to_string()),
+        );
+    }
+    if let Some(scaling) = a.scaling {
+        doc.insert("b2s_scaling".to_string(), toml::Value::Integer(scaling));
+    }
     // the wizard's other answers, kept as the defaults of the next run;
     // keys that are not given keep their previous value
     for (key, value) in [
@@ -242,11 +263,12 @@ pub fn set_b2s_answers(
     // gets the detected install, and only as a last resort the empty string
     // (load_config requires the key; the defaults tolerate an empty value)
     if doc.get("vpx_executable").is_none() {
-        let value = vpx_executable
+        let value = a
+            .vpx_executable
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_default();
         doc.insert("vpx_executable".to_string(), toml::Value::String(value));
-        if vpx_executable.is_none() {
+        if a.vpx_executable.is_none() {
             crate::println!(
                 "  note: created the config file, set vpx_executable in it to your Visual Pinball install"
             )?;
@@ -380,6 +402,7 @@ fn read_config(config_path: &Path) -> io::Result<ResolvedConfig> {
         b2s_dmddevice_ini: config.b2s_dmddevice_ini,
         b2s_screenres: config.b2s_screenres,
         b2s_playfield_width: config.b2s_playfield_width,
+        b2s_scaling: config.b2s_scaling,
     };
     Ok(resolved_config)
 }
@@ -625,6 +648,7 @@ fn write_default_config(config_file: &Path, vpx_executable: &Path) -> io::Result
         b2s_dmddevice_ini: None,
         b2s_screenres: None,
         b2s_playfield_width: None,
+        b2s_scaling: None,
     };
     write_config(config_file, &config)?;
     Ok(())
@@ -714,6 +738,7 @@ mod tests {
             b2s_dmddevice_ini: None,
             b2s_screenres: None,
             b2s_playfield_width: None,
+            b2s_scaling: None,
         }
     }
 
@@ -811,6 +836,7 @@ mod tests {
                 b2s_dmddevice_ini: None,
                 b2s_screenres: None,
                 b2s_playfield_width: None,
+                b2s_scaling: None,
             }
         );
         Ok(())
@@ -959,6 +985,7 @@ mod tests {
                 b2s_dmddevice_ini: None,
                 b2s_screenres: None,
                 b2s_playfield_width: None,
+                b2s_scaling: None,
             }
         );
         Ok(())
@@ -1001,6 +1028,7 @@ mod tests {
                 b2s_dmddevice_ini: None,
                 b2s_screenres: None,
                 b2s_playfield_width: None,
+                b2s_scaling: None,
             }
         );
         Ok(())
@@ -1145,6 +1173,7 @@ tables_scan_max_depth = 2
             b2s_dmddevice_ini: None,
             b2s_screenres: None,
             b2s_playfield_width: None,
+            b2s_scaling: None,
         };
 
         // Must not panic; the broken ini is treated as unparseable.
@@ -1183,6 +1212,7 @@ tables_scan_max_depth = 2
             b2s_dmddevice_ini: None,
             b2s_screenres: None,
             b2s_playfield_width: None,
+            b2s_scaling: None,
         };
 
         assert_eq!(
