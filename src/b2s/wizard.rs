@@ -371,7 +371,7 @@ pub fn run(args: &WizardArgs) -> io::Result<()> {
     let interactive = std::io::stdin().is_terminal() && !args.yes;
 
     // the previous run's answers are the defaults of this one
-    let answers = crate::config::b2s_answers()?;
+    let answers = crate::config::b2s_answers();
 
     // ---- step 1: DmdDevice.ini
     crate::println!("step 1: DmdDevice.ini")?;

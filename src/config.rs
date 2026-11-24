@@ -163,16 +163,21 @@ pub struct B2sAnswers {
     pub monitor: Option<String>,
 }
 
-pub fn b2s_answers() -> io::Result<B2sAnswers> {
-    let Some((_, config)) = load_config()? else {
-        return Ok(B2sAnswers::default());
+/// The wizard reads these from a config it may itself be about to create
+/// or repair, so a config that does not load - a stub without
+/// `vpx_executable`, a key of the future the parser chokes on - yields
+/// empty answers, not an error. `load_config` stays strict for everything
+/// that actually needs a valid config.
+pub fn b2s_answers() -> B2sAnswers {
+    let Ok(Some((_, config))) = load_config() else {
+        return B2sAnswers::default();
     };
-    Ok(B2sAnswers {
+    B2sAnswers {
         ini: config.b2s_dmddevice_ini.as_ref().map(PathBuf::from),
         screenres: config.b2s_screenres.as_ref().map(PathBuf::from),
         playfield_w: config.b2s_playfield_width,
         monitor: config.b2s_backglass_monitor,
-    })
+    }
 }
 
 /// Parses the config file as a document. Not `text.parse::<toml::Value>()`:
@@ -208,8 +213,9 @@ pub fn set_b2s_answers(
     // an existing file wins; a fresh one goes to the home configuration path
     let path = config_path().unwrap_or_else(home_config_path);
     let text = std::fs::read_to_string(&path).unwrap_or_default();
-    // the file is kept as a document, so comments, key order and keys that
-    // this version of vpxtool does not know survive the edit
+    // the file is kept as a document, so key order and keys that this
+    // version of vpxtool does not know survive the edit; comments do not -
+    // the round trip is through parsed values, not through toml_edit
     let mut doc = parse_config_doc(&text, &path)?;
     doc.insert(
         "b2s_backglass_monitor".to_string(),
