@@ -79,12 +79,6 @@ ignore = "0.4.33"
 [target.'cfg(not(windows))'.dependencies]
 num-format = { version = "0.4.4", features = ["with-system-locale"] }
 
-# the monitor readout for the b2s wizard: EnumDisplayMonitorsW in a
-# DPI-unaware process reports the desktop exactly as vpinmame, the B2S
-# server and DmdDevice.ini see it
-[target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Graphics_Gdi", "Win32_Foundation"] }
-
 [dev-dependencies]
 testdir = "0.10.0"
 pretty_assertions = "1.4.1"

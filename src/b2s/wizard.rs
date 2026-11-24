@@ -6,19 +6,14 @@
 //! 2560,0,2560,2880 is a guess; on a 4K playfield it slides every stamp by
 //! over a thousand pixels.
 //!
-//! Where that rectangle is cannot be read off ScreenRes.txt: the file says
-//! how big the playfield window is and how big the B2S DMD area is - the
-//! area on the backglass screen from which B2S renders the DMD, the size of
-//! the grill window on the monitor, the grill being the painted strip the
-//! DMD shows through - but the position of the backglass monitor on the
-//! desktop is Windows display placement, free to be anything, negative y
-//! included. ScreenRes.txt only says the B2S window sits at (0,0) of the
-//! screen it selects.
-//!
-//! So the wizard takes the numbers it can read as the starting point -
-//! x0 = playfield width (the default arrangement puts the backglass right
-//! of the playfield), y0 = 0, size = the backglass screen - and lets the
-//! tables themselves measure the rest.
+//! The sizes come from the files: ScreenRes.txt names the playfield window
+//! and, in the V6 format, the backglass window - in the size B2S operates
+//! at, which is the space of the ini coordinates. The position is in no
+//! file: the backglass window's spot on the desktop is Windows display
+//! placement, free to be anything, negative coordinates included. So the
+//! wizard asks for it, with the default arrangement (right of the playfield,
+//! flush with the desktop top) as the default answer - and lets the tables
+//! themselves measure the truth.
 //! The wizard reads those, then *verifies* the geometry against the user's
 //! own tables: for every table with both a detected DMD window (hole
 //! detection) and a DmdDevice.ini section, the ini rect is mapped into the
@@ -41,84 +36,6 @@ pub struct WizardArgs {
     pub jobs: usize,
     /// accept the findings without asking (non-interactive use)
     pub yes: bool,
-}
-
-/// One monitor, as Windows reports it.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Monitor {
-    pub name: String,
-    pub rect: Rect,
-}
-
-/// The monitors as Windows reports them to this process. vpxtool carries no
-/// DPI awareness manifest, so a plain build sees the desktop the way the
-/// classic Win32 programs see it - the space of the `DmdDevice.ini`
-/// coordinates - as long as no compat flags shift a program elsewhere.
-/// Empty off Windows.
-pub fn windows_monitors() -> Vec<Monitor> {
-    #[cfg(windows)]
-    {
-        use windows_sys::Win32::Graphics::Gdi::{
-            EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFOEXW,
-        };
-        unsafe extern "system" fn collect(
-            hmon: HMONITOR,
-            _hdc: HDC,
-            _rc: *mut windows_sys::Win32::Foundation::RECT,
-            data: isize,
-        ) -> i32 {
-            let out = &mut *(data as *mut Vec<Monitor>);
-            let mut mi: MONITORINFOEXW = unsafe { std::mem::zeroed() };
-            mi.monitorInfo.cbSize = std::mem::size_of::<MONITORINFOEXW>() as u32;
-            if GetMonitorInfoW(hmon, &mut mi.monitorInfo) != 0 {
-                let rc = mi.monitorInfo.rcMonitor;
-                let end = mi
-                    .szDevice
-                    .iter()
-                    .position(|c| *c == 0)
-                    .unwrap_or(mi.szDevice.len());
-                out.push(Monitor {
-                    name: String::from_utf16_lossy(&mi.szDevice[..end]),
-                    rect: Rect::new(
-                        rc.left as f64,
-                        rc.top as f64,
-                        (rc.right - rc.left) as f64,
-                        (rc.bottom - rc.top) as f64,
-                    ),
-                });
-            }
-            1
-        }
-        unsafe {
-            let mut out: Vec<Monitor> = Vec::new();
-            EnumDisplayMonitors(
-                std::ptr::null_mut(),
-                std::ptr::null(),
-                Some(collect),
-                &mut out as *mut Vec<Monitor> as isize,
-            );
-            out
-        }
-    }
-    #[cfg(not(windows))]
-    Vec::new()
-}
-
-/// The wizard defaults from the monitors: the primary monitor (the one
-/// holding the desktop origin) is the playfield, the largest of the rest the
-/// backglass.
-fn default_from_monitors(monitors: &[Monitor]) -> Option<(f64, (f64, f64))> {
-    let primary = monitors.iter().find(|m| {
-        m.rect.x <= 0.0
-            && m.rect.x + m.rect.w >= 1.0
-            && m.rect.y <= 0.0
-            && m.rect.y + m.rect.h >= 1.0
-    })?;
-    let bg = monitors
-        .iter()
-        .filter(|m| m.name != primary.name)
-        .max_by_key(|m| (m.rect.w * m.rect.h) as i64)?;
-    Some((primary.rect.w, (bg.rect.w, bg.rect.h)))
 }
 
 /// The monitor size the tables themselves imply: a table's ini DMD window is
@@ -157,12 +74,13 @@ fn estimated_monitor_size(records: &[Record]) -> Option<(f64, f64)> {
 /// tables measure the truth.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Geometry {
-    pub playfield_w: f64,
+    pub x: f64,
+    pub y: f64,
 }
 
 impl Geometry {
     pub fn monitor(&self, backglass_w: f64, backglass_h: f64) -> Rect {
-        Rect::new(self.playfield_w, 0.0, backglass_w, backglass_h)
+        Rect::new(self.x, self.y, backglass_w, backglass_h)
     }
 }
 
@@ -311,6 +229,12 @@ fn confirm(question: &str, interactive: bool) -> io::Result<bool> {
     Ok(answer.eq_ignore_ascii_case("y") || answer.eq_ignore_ascii_case("yes"))
 }
 
+/// `x,y` with optional whitespace; None when not two numbers.
+fn parse_xy(text: &str) -> Option<(f64, f64)> {
+    let (a, b) = text.trim().split_once(',')?;
+    Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
+}
+
 fn median(values: &[f64]) -> f64 {
     let mut v = values.to_vec();
     v.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -391,24 +315,49 @@ pub fn run(args: &WizardArgs) -> io::Result<()> {
     )?;
 
     // ---- step 2: the screen setup, from ScreenRes.txt when it is there.
-    // ScreenRes.txt is a hint, not the answer: it says how big the playfield
-    // is and how high the DMD area is, and the default arrangement of the
-    // B2S wiki turns those into the backglass window - x0 = playfield width,
-    // y1 = playfield height + DMD area height. The Windows monitor placement can
-    // say otherwise (a backglass monitor placed flush to the top of the
-    // desktop has y0 = 0), so the candidate is verified against the tables
-    // in step 4, and their own data corrects it.
+    // ScreenRes.txt is a hint, not the answer - a resolution change is one
+    // click in the Windows settings and the file is only rewritten by the
+    // B2S setup - so its numbers are the defaults of the questions, and the
+    // position, which no file knows, is asked outright. The candidate is
+    // verified against the tables in step 4, and their data corrects it.
     crate::println!(
         "step 2: the screen setup (the default arrangement puts the backglass window right of the playfield)"
     )?;
     crate::println!(
         "  the position of the backglass monitor on the desktop is Windows display placement, no file knows it - the tables measure it in step 4"
     )?;
-    let screenres = match &args.target {
+    let found = match &args.target {
         Target::Directory(d) => Some(d.join("ScreenRes.txt")),
         _ => None,
     }
-    .filter(|p| p.exists());
+    .filter(|p| p.is_file());
+    // the file sits with the B2S server, not necessarily with the tables -
+    // so it is asked for, with what was found as the default
+    match &found {
+        Some(p) => crate::println!("  ScreenRes.txt found: {}", p.display())?,
+        None => crate::println!("  no ScreenRes.txt in the table folder")?,
+    }
+    let default_path = found
+        .as_ref()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let answer = prompt_line(
+        "  path to ScreenRes.txt (empty to go without)",
+        Some(&default_path),
+        interactive,
+    )?;
+    let screenres = if answer.trim().is_empty() {
+        None
+    } else {
+        let path = PathBuf::from(answer.trim());
+        if !path.is_file() {
+            return Err(io::Error::other(format!(
+                "no ScreenRes.txt at {}",
+                path.display()
+            )));
+        }
+        Some(path)
+    };
     let screenres_info = match &screenres {
         Some(path) => {
             let info = read_screenres(path)?;
@@ -424,50 +373,45 @@ pub fn run(args: &WizardArgs) -> io::Result<()> {
             )?;
             Some(info)
         }
-        None => {
-            crate::println!("  no ScreenRes.txt found in the table folder")?;
-            None
-        }
+        None => None,
     };
     // the file can be stale - a resolution change is one click in the
     // Windows settings, ScreenRes.txt is only rewritten by the B2S setup -,
     // so its numbers are the defaults of the questions, not the answers
-    // on Windows, the monitor list as the ini's space sees it is the best
-    // default there is
-    let monitors = windows_monitors();
-    if !monitors.is_empty() {
-        crate::println!("  monitors as windows reports them to this process:")?;
-        for m in &monitors {
-            crate::println!(
-                "    {}  {:.0},{:.0}  {:.0}x{:.0}",
-                m.name,
-                m.rect.x,
-                m.rect.y,
-                m.rect.w,
-                m.rect.h
-            )?;
-        }
-    }
-    let mon = default_from_monitors(&monitors);
+    // the sizes come from ScreenRes.txt, the position is the one number no
+    // file has - so it is asked, with the default arrangement as its default
     let playfield_w = prompt_number(
-        "  playfield screen width (pixels): the backglass window starts at this x",
-        screenres_info
-            .map(|i| i.playfield_w)
-            .or_else(|| mon.map(|d| d.0))
-            .unwrap_or(2560.0),
+        "  playfield screen width (pixels): the default arrangement starts the backglass at this x",
+        screenres_info.map(|i| i.playfield_w).unwrap_or(2560.0),
         interactive,
     )?;
-    let geometry = Geometry { playfield_w };
     let bg_w = prompt_number(
         "  backglass screen width (pixels)",
-        mon.map(|d| d.1.0).unwrap_or(2560.0),
+        screenres_info
+            .and_then(|i| i.backglass)
+            .map(|(w, _)| w)
+            .unwrap_or(2560.0),
         interactive,
     )?;
     let bg_h = prompt_number(
         "  backglass screen height (pixels)",
-        mon.map(|d| d.1.1).unwrap_or(2880.0),
+        screenres_info
+            .and_then(|i| i.backglass)
+            .map(|(_, h)| h)
+            .unwrap_or(2880.0),
         interactive,
     )?;
+    let position = prompt_line(
+        "  backglass window position on the desktop, x,y (Windows display placement, negative allowed)",
+        Some(&format!("{playfield_w:.0},0")),
+        interactive,
+    )?;
+    let (x, y) = parse_xy(&position).ok_or_else(|| {
+        io::Error::other(format!(
+            "not a position: {position} - expected two numbers, x,y"
+        ))
+    })?;
+    let geometry = Geometry { x, y };
 
     // ---- step 3: scan (hole detection + ini lookup)
     crate::println!("step 3: scanning tables (hole detection + ini lookup)")?;
@@ -609,9 +553,7 @@ mod tests {
         // the starting point: the backglass right of a 2560 wide playfield,
         // flush with the top of the desktop; the placement Windows gives the
         // monitor is what the tables then measure
-        let g = Geometry {
-            playfield_w: 2560.0,
-        };
+        let g = Geometry { x: 2560.0, y: 0.0 };
         assert_eq!(
             g.monitor(2560.0, 2880.0),
             Rect::new(2560.0, 0.0, 2560.0, 2880.0)
@@ -634,26 +576,6 @@ mod tests {
         // the old format has no backglass section - no pixels to trust there
         assert_eq!(info.backglass, None);
         std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn the_monitors_give_the_defaults_primary_is_the_playfield() {
-        let monitors = vec![
-            Monitor {
-                name: "\\\\.\\DISPLAY1".into(),
-                rect: Rect::new(2560.0, 0.0, 1707.0, 1920.0),
-            },
-            Monitor {
-                name: "\\\\.\\DISPLAY2".into(),
-                rect: Rect::new(0.0, 0.0, 2560.0, 1440.0),
-            },
-        ];
-        // the playfield width default is the primary, the backglass size the
-        // largest of the rest
-        assert_eq!(
-            default_from_monitors(&monitors),
-            Some((2560.0, (1707.0, 1920.0)))
-        );
     }
 
     #[test]
@@ -692,6 +614,14 @@ mod tests {
         // size the ini coordinates live in
         assert_eq!(info.backglass, Some((2560.0, 2880.0)));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_position_is_x_comma_y() {
+        assert_eq!(parse_xy("3840,0"), Some((3840.0, 0.0)));
+        assert_eq!(parse_xy(" 1283 , -846 "), Some((1283.0, -846.0)));
+        assert_eq!(parse_xy("3840"), None);
+        assert_eq!(parse_xy("a,b"), None);
     }
 
     #[test]
