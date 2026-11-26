@@ -269,6 +269,61 @@ fn parse_xy(text: &str) -> Option<(f64, f64)> {
 /// monitor's space), sizes must be in a plausible range, an ini with two
 /// sections is probably the wrong file, and answers that disagree with
 /// ScreenRes.txt mean one of the two is stale.
+/// Which window the ini's DMD windows sit on, read from their positions:
+/// the ScoreView window is the ScreenRes.txt DMD area, a small rectangle on
+/// the backglass monitor. Windows that fit inside that rectangle can only
+/// mean the FullDMD screen; windows scattered past it mean the grill
+/// cut-out on the backglass. None when the files cannot tell (no
+/// ScreenRes.txt, no DMD area, too few windows to judge).
+fn guess_ini_target(
+    ini: &DmdDeviceIni,
+    monitor: Rect,
+    screenres: Option<ScreenResInfo>,
+) -> Option<(crate::b2s::IniTarget, String)> {
+    let sr = screenres?;
+    let (bg_w, bg_h) = sr.backglass?;
+    let (ax, ay, aw, ah) = sr.dmd_area?;
+    let rects = ini.window_rects();
+    if rects.len() < 8 || aw <= 0.0 || ah <= 0.0 || bg_w <= 0.0 || bg_h <= 0.0 {
+        return None;
+    }
+    let sx = monitor.w / bg_w;
+    let sy = monitor.h / bg_h;
+    let area = Rect::new(monitor.x + ax * sx, monitor.y + ay * sy, aw * sx, ah * sy);
+    // the same hair of tolerance the sanity check uses
+    let (mx, my) = (0.02 * area.w, 0.02 * area.h);
+    let inside = rects
+        .iter()
+        .filter(|r| {
+            r.x >= area.x - mx
+                && r.x + r.w <= area.x + area.w + mx
+                && r.y >= area.y - my
+                && r.y + r.h <= area.y + area.h + my
+        })
+        .count();
+    if inside * 5 >= rects.len() * 4 {
+        Some((
+            crate::b2s::IniTarget::ScoreView,
+            format!(
+                "  {} of {} ini DMD windows fit inside the DMD area {}: they sit on the FullDMD screen",
+                inside,
+                rects.len(),
+                rect_string(&area)
+            ),
+        ))
+    } else {
+        Some((
+            crate::b2s::IniTarget::Backglass,
+            format!(
+                "  only {} of {} ini DMD windows fit inside the DMD area {}: they sit on the backglass",
+                inside,
+                rects.len(),
+                rect_string(&area)
+            ),
+        ))
+    }
+}
+
 fn sanity_problems(
     monitor: Rect,
     pf_w: f64,
@@ -434,17 +489,6 @@ pub fn run(args: &WizardArgs) -> io::Result<()> {
         ini_path.display(),
         ini.section_count()
     )?;
-    // the FullDMD era shows the DMD on its own ScoreView window over the
-    // DMDImage canvas; the ini windows then sit on that window, and the
-    // mapping into the backglass image goes through the ScreenRes.txt area
-    let answer = prompt_line(
-        "  the ini's DMD windows sit on which window: backglass (the grill cut-out) or scoreview (the FullDMD screen)",
-        answers.ini_target.as_deref().or(Some("backglass")),
-        interactive,
-    )?;
-    let ini_target = answer
-        .parse::<super::IniTarget>()
-        .map_err(io::Error::other)?;
 
     // ---- step 2: the screen setup, from ScreenRes.txt when it is there.
     // ScreenRes.txt is a hint, not the answer - a resolution change is one
@@ -579,6 +623,38 @@ pub fn run(args: &WizardArgs) -> io::Result<()> {
             "not a position: {position} - expected two numbers, x,y"
         ))
     })?;
+    // the FullDMD era shows the DMD on its own ScoreView window over the
+    // DMDImage canvas; the ini windows then sit on that window, and the
+    // mapping into the backglass image goes through the ScreenRes.txt area.
+    // The ini's own windows tell which is which: the ScoreView window is
+    // the DMD area, a small rectangle on the backglass monitor, and
+    // windows that fit inside it can only sit on the FullDMD screen
+    let candidate = Geometry {
+        x: px * scale,
+        y: py * scale,
+    }
+    .monitor(bg_w * scale, bg_h * scale);
+    let guess = guess_ini_target(&ini, candidate, screenres_info);
+    if let Some((_, why)) = &guess {
+        crate::println!("{why}")?;
+    }
+    let default_target = guess
+        .as_ref()
+        .map(|(t, _)| t.to_string())
+        .unwrap_or_else(|| {
+            answers
+                .ini_target
+                .clone()
+                .unwrap_or_else(|| "backglass".to_string())
+        });
+    let answer = prompt_line(
+        "  the ini's DMD windows sit on which window: backglass (the grill cut-out) or scoreview (the FullDMD screen)",
+        Some(&default_target),
+        interactive,
+    )?;
+    let ini_target = answer
+        .parse::<super::IniTarget>()
+        .map_err(io::Error::other)?;
     // everything that looks fishy gets asked about, with the current values
     // as the defaults of the second round; the checks run on the computed
     // ini-space rectangle
@@ -961,6 +1037,72 @@ virtualdmd height=200
             crate::b2s::IniTarget::Backglass,
         );
         assert!(bad.iter().any(|p| p.contains("10 of 10")), "{bad:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    fn window_ini(y0: f64) -> String {
+        (0..9)
+            .map(|i| {
+                format!(
+                    "[r{i}]
+virtualdmd left=4300
+virtualdmd top={}
+                     virtualdmd width=800
+virtualdmd height=600
+",
+                    y0 + i as f64 * 20.0
+                )
+            })
+            .collect::<String>()
+    }
+
+    fn area_sr() -> ScreenResInfo {
+        ScreenResInfo {
+            playfield_w: 2000.0,
+            playfield_h: 2000.0,
+            backglass: Some((2000.0, 2000.0)),
+            dmd_area: Some((100.0, 200.0, 800.0, 600.0)),
+            bg_pos: (0.0, 0.0),
+        }
+    }
+
+    #[test]
+    fn read_the_v6_screenres() {
+        let dir = std::env::temp_dir().join("vpxtool-sr-v6");
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("ScreenRes.txt");
+        std::fs::write(&p, "# V6.0.0\n# Playfield Screen resolution width/height\n2560\n1440\n# Backglass width/height\n2560\n2880\n# Define Backglass screen using Display Devicename screen number\n=2\n# Backglass x/y position relative to the upper left corner of the screen selected\n0\n0\n# width/height of the B2S (or Full) DMD area\n1280\n960\n# x/y position of the B2S (or Full) DMD area - relative to the upper left corner of the backglass window\n0\n0\n").unwrap();
+        let sr = super::read_screenres(&p).unwrap();
+        assert_eq!(sr.backglass, Some((2560.0, 2880.0)));
+        assert_eq!(sr.dmd_area, Some((0.0, 0.0, 1280.0, 960.0)));
+    }
+
+    #[test]
+    fn the_ini_positions_tell_which_window_they_sit_on() {
+        let dir = std::env::temp_dir().join("vpxtool-guess-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // the DMD area on the desktop: 4000 + 100*2, 200*2, 800*2, 600*2
+        // = 4200,400,1600,1200
+        let monitor = Rect::new(4000.0, 0.0, 4000.0, 4000.0);
+        // windows inside that rectangle: the FullDMD screen
+        let ini = ini_fixture(&dir, "sv.ini", &window_ini(500.0));
+        let (target, why) = guess_ini_target(&ini, monitor, Some(area_sr())).unwrap();
+        assert_eq!(target, crate::b2s::IniTarget::ScoreView);
+        assert!(why.contains("9 of 9"), "{why}");
+        // windows far below it, at the grill: the backglass
+        let ini = ini_fixture(&dir, "bg.ini", &window_ini(2600.0));
+        let (target, why) = guess_ini_target(&ini, monitor, Some(area_sr())).unwrap();
+        assert_eq!(target, crate::b2s::IniTarget::Backglass);
+        assert!(why.contains("only 0 of 9"), "{why}");
+        // without the DMD area there is nothing to judge from
+        let ini = ini_fixture(&dir, "noarea.ini", &window_ini(500.0));
+        let sr = ScreenResInfo {
+            dmd_area: None,
+            ..area_sr()
+        };
+        assert!(guess_ini_target(&ini, monitor, Some(sr)).is_none());
+        assert!(guess_ini_target(&ini, monitor, None).is_none());
         std::fs::remove_dir_all(&dir).ok();
     }
 

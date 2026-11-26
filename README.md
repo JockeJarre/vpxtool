@@ -229,10 +229,15 @@ none do, and a majority falling outside is reported before the scan. When
 the scan starts, all answers are saved to the config
 (`b2s_dmddevice_ini`, `b2s_screenres`, `b2s_playfield_width`, `b2s_scaling`,
 `b2s_ini_target`) and are the
-defaults of the next run. Step 1 also asks which window the ini's DMD
+defaults of the next run. Step 2 also asks which window the ini's DMD
 rectangles sit on: `backglass` (the classic grill cut-out) or `scoreview` (the
-FullDMD screen over the `DMDImage`); a `scoreview` answer maps the ini windows
-through the `ScreenRes.txt` DMD area. Then
+FullDMD screen over the `DMDImage`). The wizard **guesses it from the
+numbers**: the ScoreView window is the `ScreenRes.txt` DMD area, a small
+rectangle on the backglass monitor - if (almost) all of the ini's DMD windows
+fit inside that rectangle they can only sit on the FullDMD screen, if they
+are scattered past it they sit on the backglass; the verdict is printed and
+becomes the default of the question. A `scoreview` answer maps the ini windows
+through the DMD area. Then
 *verifies* the candidate against your own tables: on every table with both a
 detected DMD window and an ini section, the median offset of the mapped ini
 rect to the detected window says where the candidate is wrong, and the
