@@ -863,8 +863,7 @@ fn pick(policy: Policy, rec: &Record) -> Option<(Rect, &'static str)> {
                 // against the window's own width, both axes
                 let dx = ((hole.x + hole.w / 2.0) - (ini.x + ini.w / 2.0)).abs();
                 let dy = ((hole.y + hole.h / 2.0) - (ini.y + ini.h / 2.0)).abs();
-                let tol = 0.15 * hole.w.max(ini.w);
-                if dx <= tol && dy <= tol {
+                if dx <= 0.15 * hole.w.max(ini.w) && dy <= 0.5 * hole.h {
                     Some((ini, "ini"))
                 } else {
                     Some((hole, "hole"))
@@ -1794,6 +1793,7 @@ mod auto_agreement_tests {
             ini_in_image: Some(Rect::new(482.0, 1250.0, 1023.0, 210.0)),
             backglass_size: Some((2500, 3022)),
             grill_height: Some(373.0),
+            ini_section: true,
             ..Default::default()
         };
         assert_eq!(
@@ -1811,6 +1811,7 @@ mod auto_agreement_tests {
             ini_in_image: Some(Rect::new(2200.0, 1250.0, 300.0, 163.0)),
             backglass_size: Some((2500, 3022)),
             grill_height: Some(373.0),
+            ini_section: true,
             ..Default::default()
         };
         assert_eq!(
