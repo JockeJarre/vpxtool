@@ -231,6 +231,79 @@ pub struct B2sAnswersInput<'a> {
     pub vpx_executable: Option<&'a Path>,
 }
 
+/// Comments that explain why the stored numbers can look strange: the
+/// config keeps the ini's desktop space, and on a monitor that is not at
+/// 100% that is not what the display settings show. The comments are
+/// regenerated on every edit - the round trip is through parsed values, so
+/// comments of the file cannot survive it - and they name the conversion
+/// for the values that are actually in the file.
+fn annotate_b2s_comments(out: &str, doc: &toml::Table) -> String {
+    let scaling = doc.get("b2s_scaling").and_then(|v| v.as_integer());
+    let monitor = doc
+        .get("b2s_backglass_monitor")
+        .and_then(|v| v.as_str())
+        .and_then(|t| t.parse::<crate::b2s::Rect>().ok());
+    // the numbers as the Windows display settings show them: the size
+    // stands, the position is the stored one divided by the scaling
+    let mut monitor_comment: Vec<String> = [
+        "# the backglass monitor in the ini's desktop space: the size is what",
+        "# the Windows display settings show, the position is multiplied by",
+        "# the scaling of the backglass monitor - the B2S server, vpinmame",
+        "# and DmdDevice.ini live in that scaled desktop",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    match (scaling, monitor) {
+        (Some(s), Some(m)) if s != 100 => {
+            let f = 100.0 / s as f64;
+            monitor_comment.push(format!(
+                "# scaling {s}%: the display settings show this monitor at {:.0},{:.0} with {:.0}x{:.0};",
+                m.x * f,
+                m.y * f,
+                m.w,
+                m.h
+            ));
+            monitor_comment.push(format!(
+                "# the position times {} is what is stored - x {:.0} becomes x {:.0},",
+                s as f64 / 100.0,
+                m.x * f,
+                m.x
+            ));
+            monitor_comment
+                .push("# that is why the numbers look off on a machine with scaling".to_string());
+        }
+        (Some(_), Some(_)) => monitor_comment.push(
+            "# the scaling is 100%: these numbers are exactly what the display settings show"
+                .to_string(),
+        ),
+        _ => {}
+    }
+    let scaling_comment: Vec<String> = [
+        "# Windows scaling of the backglass monitor in percent, the way the",
+        "# display settings show it; the playfield is taken as 100%. The",
+        "# wizard takes the display settings numbers and converts the",
+        "# position by this number into the ini's space above",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    let mut lines: Vec<String> = Vec::new();
+    for line in out.lines() {
+        if line.starts_with("b2s_backglass_monitor = ") {
+            lines.extend(monitor_comment.iter().cloned());
+        } else if line.starts_with("b2s_scaling = ") {
+            lines.extend(scaling_comment.iter().cloned());
+        }
+        lines.push(line.to_string());
+    }
+    let mut text = lines.join("\n");
+    if out.ends_with("\n") {
+        text.push('\n');
+    }
+    text
+}
+
 pub fn set_b2s_answers(a: &B2sAnswersInput<'_>) -> io::Result<PathBuf> {
     let ini = a.ini;
     let screenres = a.screenres;
@@ -291,6 +364,7 @@ pub fn set_b2s_answers(a: &B2sAnswersInput<'_>) -> io::Result<PathBuf> {
     }
     let out = toml::to_string_pretty(&doc)
         .map_err(|e| io::Error::other(format!("serialize {}: {e}", path.display())))?;
+    let out = annotate_b2s_comments(&out, &doc);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -858,6 +932,59 @@ mod tests {
                 b2s_ini_target: None,
             }
         );
+        Ok(())
+    }
+
+    fn annotated(out: &str, doc: &toml::Table) -> String {
+        annotate_b2s_comments(out, doc)
+    }
+
+    #[test]
+    fn the_scaling_comments_name_the_conversion_they_hide() -> io::Result<()> {
+        let doc = parse_config_doc(
+            "vpx_executable = \"\"
+b2s_backglass_monitor = \"3840,0,2560,2880\"
+b2s_scaling = 150
+",
+            Path::new("vpxtool.cfg"),
+        )?;
+        let out = toml::to_string_pretty(&doc).unwrap();
+        let joined = annotated(&out, &doc);
+        let lines: Vec<&str> = joined.lines().collect();
+        let at = lines
+            .iter()
+            .position(|l| l.starts_with("b2s_backglass_monitor = "))
+            .unwrap();
+        // the comment sits above the key and shows the display settings
+        // numbers the stored ones came from
+        assert!(lines[at - 1].starts_with('#'));
+        assert!(joined.contains("scaling 150%"), "{joined}");
+        assert!(joined.contains("2560,0 with 2560x2880"), "{joined}");
+        assert!(joined.contains("x 2560 becomes x 3840"), "{joined}");
+        assert!(joined.contains("b2s_scaling = 150"), "{joined}");
+        // the comments are only comments: the file reparses, values intact
+        let reread = parse_config_doc(&joined, Path::new("vpxtool.cfg"))?;
+        assert_eq!(
+            reread.get("b2s_backglass_monitor").and_then(|v| v.as_str()),
+            Some("3840,0,2560,2880")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_config_without_scaling_noise_stays_quiet() -> io::Result<()> {
+        let doc = parse_config_doc(
+            "vpx_executable = \"\"
+b2s_backglass_monitor = \"2560,0,2560,2880\"
+",
+            Path::new("vpxtool.cfg"),
+        )?;
+        let out = toml::to_string_pretty(&doc).unwrap();
+        let joined = annotated(&out, &doc);
+        // the general explanation, no conversion of values nobody scaled
+        assert!(joined.contains("the ini's desktop space"));
+        assert!(!joined.contains("scaling 150%"));
+        assert!(!joined.contains("b2s_scaling"));
         Ok(())
     }
 
