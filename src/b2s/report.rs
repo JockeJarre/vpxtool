@@ -125,6 +125,19 @@ pub fn print(records: &[Record]) {
                 "  STAMP {:.0},{:.0} {:.0}x{:.0}  <- {src}  [{tlist}]\n",
                 r.x, r.y, r.w, r.h
             ));
+            // ScoreView lives in its own space: the DMDImage canvas, top
+            // left 0,0 - show it when it differs from the backglass numbers
+            if let Some((_, sv)) = targets.iter().find(|(t, _)| t == "ScoreView")
+                && ((sv.x - r.x).abs() > 1.0
+                    || (sv.y - r.y).abs() > 1.0
+                    || (sv.w - r.w).abs() > 1.0
+                    || (sv.h - r.h).abs() > 1.0)
+            {
+                out.push_str(&format!(
+                    "        ScoreView {:.0},{:.0} {:.0}x{:.0}  (DMDImage px, its top left is 0,0)\n",
+                    sv.x, sv.y, sv.w, sv.h
+                ));
+            }
             if let Some(a) = rec.chosen.map(|r| r.aspect()) {
                 out.push_str(&format!("        ratio {a:.3}  "));
                 out.push_str(match rec.aspect {

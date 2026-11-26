@@ -181,6 +181,11 @@ pub struct Record {
     pub dmd_image_size: Option<(u32, u32)>,
     pub hole_backglass: Option<Rect>,
     pub hole_dmd_image: Option<Rect>,
+    /// the stamp rectangle for `Target="ScoreView"`, in the only space it
+    /// lives in: DMDImage canvas pixels, the top left of the DMDImage is
+    /// 0,0 - never backglass pixels
+    #[serde(default)]
+    pub scoreview_rect: Option<Rect>,
     /// flat rectangles the tracer saw in the backglass image, before the
     /// DMD-shape filter. Used to stop the template guessing when the image
     /// already contains a stripe that is not a DMD window.
@@ -666,6 +671,9 @@ fn analyze(
     if let Some((rect, source)) = pick(policy, rec) {
         rec.chosen = Some(rect);
         rec.source = Some(source.to_string());
+        if rec.has_dmd_image {
+            rec.scoreview_rect = to_dmdimage_space(rec, policy);
+        }
         if !has_grill(rec) {
             rec.notes.push(
                 "no grill strip: Target=\"Backglass\" omitted, stamped Target=\"ScoreView\" only"
@@ -724,11 +732,55 @@ fn analyze(
 pub const MIN_GRILL_PX: f64 = 10.0;
 pub const MIN_GRILL_FRAC: f64 = 0.01;
 
+/// The rectangle for `Target="ScoreView"`, in the DMDImage's own space:
+/// DMDImage pixels, top left 0,0. A window traced inside the DMDImage is
+/// already there. Everything else - a hole in the backglass, the ini
+/// mapping - describes the window on the backglass image; the ScoreView
+/// window paints the DMDImage over the ScreenRes DMD area, so the spot
+/// inside that area, scaled by the DMDImage, is the canvas rectangle.
+/// Without a DMD area the image covers the whole backglass.
+fn to_dmdimage_space(rec: &Record, policy: Policy) -> Option<Rect> {
+    let dmd = rec.dmd_image_size?;
+    if let Some(h) = rec.hole_dmd_image {
+        return Some(h);
+    }
+    let rect = rec.chosen?;
+    let img = rec.backglass_size?;
+    let canvas = policy
+        .screenres
+        .and_then(|s| {
+            let (ax, ay, aw, ah) = s.dmd_area?;
+            let (bg_w, bg_h) = s.backglass?;
+            if aw <= 0.0 || ah <= 0.0 || bg_w <= 0.0 || bg_h <= 0.0 {
+                return None;
+            }
+            Some(Rect::new(
+                ax * img.0 as f64 / bg_w,
+                ay * img.1 as f64 / bg_h,
+                aw * img.0 as f64 / bg_w,
+                ah * img.1 as f64 / bg_h,
+            ))
+        })
+        .unwrap_or(Rect::new(0.0, 0.0, img.0 as f64, img.1 as f64));
+    if canvas.w <= 0.0 || canvas.h <= 0.0 {
+        return None;
+    }
+    let sx = dmd.0 as f64 / canvas.w;
+    let sy = dmd.1 as f64 / canvas.h;
+    Some(Rect::new(
+        (rect.x - canvas.x) * sx,
+        (rect.y - canvas.y) * sy,
+        rect.w * sx,
+        rect.h * sy,
+    ))
+}
+
 /// Which `<DMD>` elements this record's file supports: `Target="Backglass"`
 /// over a real grill strip, `Target="ScoreView"` over the FullDMD canvas (a
-/// `DMDImage` in the file). Both carry the same rectangle: on a grill table
-/// the ScoreView window overlays the grill cut-out, and the user-authored
-/// ScoreView-era files write the two elements with one rectangle.
+/// `DMDImage` in the file). The two rectangles live in different spaces:
+/// Backglass is backglass image pixels, ScoreView is DMDImage pixels with
+/// the DMDImage's own top left as 0,0 - the same window, the canvas it is
+/// painted on.
 pub fn stamp_targets(rec: &Record) -> Vec<(String, Rect)> {
     let Some(rect) = rec.chosen else {
         return Vec::new();
@@ -738,7 +790,7 @@ pub fn stamp_targets(rec: &Record) -> Vec<(String, Rect)> {
         targets.push(("Backglass".to_string(), rect));
     }
     if rec.has_dmd_image {
-        targets.push(("ScoreView".to_string(), rect));
+        targets.push(("ScoreView".to_string(), rec.scoreview_rect.unwrap_or(rect)));
     }
     targets
 }
@@ -1173,6 +1225,71 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_scoreview_stamp_is_measured_on_the_dmdimage_canvas() {
+        // a hole traced inside the DMDImage is already in the canvas space
+        let rec = Record {
+            has_dmd_image: true,
+            dmd_image_size: Some((1280, 960)),
+            backglass_size: Some((2500, 2290)),
+            chosen: Some(Rect::new(600.0, 1000.0, 1200.0, 300.0)),
+            scoreview_rect: Some(Rect::new(100.0, 200.0, 1200.0, 300.0)),
+            ..Default::default()
+        };
+        let t = stamp_targets(&rec);
+        let sv = t.iter().find(|(n, _)| n == "ScoreView").unwrap().1;
+        assert_eq!(sv, Rect::new(100.0, 200.0, 1200.0, 300.0));
+    }
+
+    #[test]
+    fn a_backglass_spot_maps_to_the_dmdimage_over_the_whole_backglass() {
+        // no DMD area: the DMDImage covers the backglass, the mapping is
+        // the plain ratio - half the backglass is half the canvas
+        let rec = Record {
+            has_dmd_image: true,
+            dmd_image_size: Some((1250, 1145)),
+            backglass_size: Some((2500, 2290)),
+            chosen: Some(Rect::new(600.0, 1000.0, 1200.0, 300.0)),
+            hole_dmd_image: None,
+            ..Default::default()
+        };
+        let sv = to_dmdimage_space(&rec, test_policy()).unwrap();
+        assert_eq!(sv, Rect::new(300.0, 500.0, 600.0, 150.0));
+    }
+
+    #[test]
+    fn a_backglass_spot_maps_to_the_dmdimage_over_the_dmd_area() {
+        // ScreenRes: the ScoreView window is the DMD area 1280x960 at
+        // 640,480 on a 2560x2880 backglass, painted into a 2500x2290
+        // image: the canvas spot, scaled by the 1280x960 DMDImage
+        let rec = Record {
+            has_dmd_image: true,
+            dmd_image_size: Some((1280, 960)),
+            backglass_size: Some((2500, 2290)),
+            chosen: Some(Rect::new(937.5, 763.5, 625.0, 382.0)),
+            hole_dmd_image: None,
+            ..Default::default()
+        };
+        let policy = Policy {
+            screenres: Some(crate::b2s::wizard::ScreenResInfo {
+                playfield_w: 2560.0,
+                playfield_h: 1440.0,
+                backglass: Some((2560.0, 2880.0)),
+                dmd_area: Some((640.0, 480.0, 1280.0, 960.0)),
+                bg_pos: (0.0, 0.0),
+            }),
+            ..test_policy()
+        };
+        // the canvas of the DMD area inside the image: 625,381.7 1250x763.3;
+        // the chosen spot is at its quarter width and half height, and the
+        // 1280x960 DMDImage scales that to 320,480 640x480
+        let sv = to_dmdimage_space(&rec, policy).unwrap();
+        assert!((sv.x - 320.0).abs() < 0.01, "{sv:?}");
+        assert!((sv.y - 480.2).abs() < 0.05, "{sv:?}");
+        assert!((sv.w - 640.0).abs() < 0.01, "{sv:?}");
+        assert!((sv.h - 480.42).abs() < 0.01, "{sv:?}");
+    }
+
     fn test_policy() -> Policy {
         Policy {
             method: Method::Hole,
@@ -1277,6 +1394,7 @@ mod tests {
             screenres: None,
         };
         let rec = Record {
+            scoreview_rect: None,
             hole_dmd_image: Some(Rect::new(111.0, 618.0, 1696.0, 419.0)),
             grill_height: Some(400.0),
             ..Default::default()
