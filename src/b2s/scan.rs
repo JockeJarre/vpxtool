@@ -851,11 +851,29 @@ fn pick(policy: Policy, rec: &Record) -> Option<(Rect, &'static str)> {
     let rect_and_source = match policy.method {
         Method::Ini => from_ini.map(|r| (r, "ini")),
         Method::Hole => from_hole.map(|r| (r, "hole")),
-        // the ini window is on the desktop, the hole is already where the tag
-        // wants its numbers, so the hole wins
-        Method::Auto => from_hole
-            .map(|r| (r, "hole"))
-            .or_else(|| from_ini.map(|r| (r, "ini"))),
+        // A tuned DmdDevice.ini is the most exact source there is: the
+        // owner placed that window for this very ROM. The traced hole is a
+        // few pixels shy on photo-real backglasses, where the dark window
+        // fades into the artwork. So when the two agree on the center, the
+        // ini wins; when they disagree, the ini is a foreign window (a
+        // default from another machine) and the hole wins.
+        Method::Auto => match (from_hole, from_ini) {
+            (Some(hole), Some(ini)) => {
+                // a DMD window is a wide, short strip; its center is judged
+                // against the window's own width, both axes
+                let dx = ((hole.x + hole.w / 2.0) - (ini.x + ini.w / 2.0)).abs();
+                let dy = ((hole.y + hole.h / 2.0) - (ini.y + ini.h / 2.0)).abs();
+                let tol = 0.15 * hole.w.max(ini.w);
+                if dx <= tol && dy <= tol {
+                    Some((ini, "ini"))
+                } else {
+                    Some((hole, "hole"))
+                }
+            }
+            (Some(hole), None) => Some((hole, "hole")),
+            (None, Some(ini)) => Some((ini, "ini")),
+            (None, None) => None,
+        },
         // then the rectangle the author already wrote, and only then the box
         // the authoring tools draw. That last resort needs two things: a
         // backglass with DMD evidence, and an image in which the tracer saw no
@@ -1598,6 +1616,20 @@ mod tests {
             ini_section: true,
             ..Default::default()
         };
+        // the two agree on the center: the tuned ini window wins
+        assert_eq!(
+            pick(policy, &rec),
+            Some((Rect::new(480.0, 1255.0, 1033.0, 209.0), "ini"))
+        );
+        // a window from another machine, a quarter of the strip away: the hole
+        let rec = Record {
+            hole_backglass: Some(Rect::new(500.0, 1240.0, 1024.0, 216.0)),
+            ini_in_image: Some(Rect::new(1800.0, 1255.0, 300.0, 130.0)),
+            backglass_size: Some((2000, 1565)),
+            grill_height: Some(300.0),
+            ini_section: true,
+            ..Default::default()
+        };
         assert_eq!(
             pick(policy, &rec),
             Some((Rect::new(500.0, 1240.0, 1024.0, 216.0), "hole"))
@@ -1734,5 +1766,56 @@ mod tests {
             ..rec
         };
         assert_eq!(pick(policy, &rec), None);
+    }
+}
+
+#[cfg(test)]
+mod auto_agreement_tests {
+    use super::*;
+
+    fn policy() -> Policy {
+        Policy {
+            method: Method::Auto,
+            aspect: Aspect::Hole,
+            native: None,
+            backglass: "3840,0,2560,2880".parse().unwrap(),
+            want_images: true,
+            ini_target: Default::default(),
+            screenres: None,
+        }
+    }
+
+    #[test]
+    fn a_matching_ini_window_wins_over_the_hole() {
+        // afm on the cabinet: the traced hole is 40 px short, the owner's ini
+        // window sits right on the window - the centers agree
+        let rec = Record {
+            hole_backglass: Some(Rect::new(498.0, 1285.0, 970.0, 163.0)),
+            ini_in_image: Some(Rect::new(482.0, 1250.0, 1023.0, 210.0)),
+            backglass_size: Some((2500, 3022)),
+            grill_height: Some(373.0),
+            ..Default::default()
+        };
+        assert_eq!(
+            pick(policy(), &rec),
+            Some((Rect::new(482.0, 1250.0, 1023.0, 210.0), "ini"))
+        );
+    }
+
+    #[test]
+    fn a_foreign_ini_window_loses_to_the_hole() {
+        // a default window from another machine: the center is a fifth of the
+        // image away, the hole is the one that sits on the painted window
+        let rec = Record {
+            hole_backglass: Some(Rect::new(300.0, 1285.0, 970.0, 163.0)),
+            ini_in_image: Some(Rect::new(2200.0, 1250.0, 300.0, 163.0)),
+            backglass_size: Some((2500, 3022)),
+            grill_height: Some(373.0),
+            ..Default::default()
+        };
+        assert_eq!(
+            pick(policy(), &rec),
+            Some((Rect::new(300.0, 1285.0, 970.0, 163.0), "hole"))
+        );
     }
 }
