@@ -345,11 +345,12 @@ vpx_config = "/home/myuser/.local/share/VPinballX/10.8/VPinballX.ini"
 # how deep the frontend looks for tables below the tables folder
 tables_scan_max_depth = 3
 
-# the backglass monitor in desktop pixels, for `b2s stampdmd --method ini`:
-# DmdDevice.ini stores desktop-absolute coordinates, so the x of the
-# backglass monitor (it sits right of the playfield monitor) is subtracted
-# before mapping into the backglass image. A 4K playfield and a 2560x2880
-# backglass monitor give:
+# the backglass monitor in the coordinate space of DmdDevice.ini, written
+# by `b2s wizard`: the Windows display settings divided by b2s_scaling, size
+# and position alike (the classic apps see the desktop at that reduced
+# size). A 4K playfield at 100% and a 2560x2880 backglass at 100% give;
+# the same backglass at 150% on a 2560 wide playfield gives
+# "1707,0,1707,1920":
 b2s_backglass_monitor = "3840,0,2560,2880"
 
 # the answers of `b2s wizard`: the ini, the ScreenRes.txt, the playfield

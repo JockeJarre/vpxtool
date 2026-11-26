@@ -144,6 +144,26 @@ pub fn read_screenres(path: &Path) -> io::Result<ScreenResInfo> {
             }
         }
     }
+    if pf.len() < 2 && !text.lines().any(|l| l.trim().starts_with('#')) {
+        // a bare number file (one value per line, no comments): the V6
+        // order is playfield w,h, backglass w,h, screen, backglass x,y,
+        // dmd area w,h, dmd area x,y
+        let nums: Vec<f64> = text
+            .split_whitespace()
+            .filter_map(|t| t.parse::<f64>().ok())
+            .collect();
+        if nums.len() >= 4 {
+            pf = vec![nums[0], nums[1]];
+            bg = vec![nums[2], nums[3]];
+            if nums.len() >= 7 {
+                bg_xy = vec![nums[5], nums[6]];
+            }
+            if nums.len() >= 11 {
+                area_wh = vec![nums[7], nums[8]];
+                area_xy = vec![nums[9], nums[10]];
+            }
+        }
+    }
     if pf.len() < 2 {
         // the old format's header is "#Playfield resolution" - covered above;
         // as a last resort, the first two numbers of the file are the
@@ -169,7 +189,12 @@ pub fn read_screenres(path: &Path) -> io::Result<ScreenResInfo> {
         } else {
             None
         },
-        dmd_area: if area_wh.len() == 2 && area_xy.len() == 2 {
+        // an area of a few pixels means "not in use"
+        dmd_area: if area_wh.len() == 2
+            && area_xy.len() == 2
+            && area_wh[0] >= 32.0
+            && area_wh[1] >= 32.0
+        {
             Some((area_xy[0], area_xy[1], area_wh[0], area_wh[1]))
         } else {
             None
@@ -326,6 +351,7 @@ fn guess_ini_target(
 
 fn sanity_problems(
     monitor: Rect,
+    scale: f64,
     pf_w: f64,
     ini: &DmdDeviceIni,
     screenres: Option<ScreenResInfo>,
@@ -381,21 +407,12 @@ fn sanity_problems(
     }
     if let Some(sr) = screenres
         && let Some((w, h)) = sr.backglass
-        && ((bg_w - w).abs() > 0.2 * w || (bg_h - h).abs() > 0.2 * h)
     {
-        // a clean ratio is not staleness, it is the display scaling: the
-        // answer is the physical panel, ScreenRes.txt and the ini live in
-        // the scaled space - say so in numbers, it is the one confusion
-        // this wizard keeps running into
-        let (rx, ry) = (w / bg_w, h / bg_h);
-        if (rx - ry).abs() < 0.03 && (1.05..2.6).contains(&rx) {
+        // ScreenRes.txt states the settings size; compare on that space
+        let (aw, ah) = (bg_w * scale, bg_h * scale);
+        if (aw - w).abs() > 0.2 * w || (ah - h).abs() > 0.2 * h {
             out.push(format!(
-                "ScreenRes.txt says {w:.0}x{h:.0} and the answers {bg_w:.0}x{bg_h:.0} differ by a ratio of {:.0}%: that is the scaling seen by classic apps (a 2560x2880 panel at 150% is 1707x1920 to them) - the display settings show {w:.0}x{h:.0}; answer the resolution the settings show, the sizes go into the ini's space as they stand, only the position is multiplied by the scaling",
-                rx * 100.0
-            ));
-        } else {
-            out.push(format!(
-                "ScreenRes.txt says {w:.0}x{h:.0}, the answers say {bg_w:.0}x{bg_h:.0} - one of the two is stale"
+                "ScreenRes.txt says {w:.0}x{h:.0}, the answers say {aw:.0}x{ah:.0} - one of the two is stale"
             ));
         }
     }
@@ -459,15 +476,15 @@ fn residuals(records: &[Record], monitor: &Rect) -> (Vec<f64>, Vec<f64>, usize) 
     (dxs, dys, pairs)
 }
 
-/// the monitor in the numbers the user typed: the position as the display
-/// settings show it (the ini's position divided by the scaling), the sizes
-/// stand. What the wizard shows the user; the ini's space stays inside.
+/// the monitor in the numbers the user typed: the ini's space multiplied
+/// by the scaling, sizes and position alike. What the wizard shows the
+/// user; the ini's space is what the config stores.
 fn settings_string(monitor: Rect, scale: f64) -> String {
     rect_string(&Rect::new(
-        monitor.x / scale,
-        monitor.y / scale,
-        monitor.w,
-        monitor.h,
+        monitor.x * scale,
+        monitor.y * scale,
+        monitor.w * scale,
+        monitor.h * scale,
     ))
 }
 
@@ -555,8 +572,9 @@ pub fn run(args: &WizardArgs) -> io::Result<()> {
                 info.playfield_w,
                 info.playfield_h,
                 match info.backglass {
-                    Some((w, h)) =>
-                        format!(", backglass window {w:.0}x{h:.0} (the size in the ini's space)"),
+                    Some((w, h)) => format!(
+                        ", backglass window {w:.0}x{h:.0} (as the display settings show it)"
+                    ),
                     None => String::new(),
                 }
             )?;
@@ -573,14 +591,14 @@ pub fn run(args: &WizardArgs) -> io::Result<()> {
         .monitor
         .as_deref()
         .and_then(|t| t.parse::<Rect>().ok());
-    // the one question that unlocks the positions: the sizes in the
-    // Windows display settings go into the ini's space unchanged (the
-    // display settings show 2560x2880, the ini's monitor is 2560x2880),
-    // but a scaled monitor's position is multiplied by the scaling: the
-    // backglass right of a 2560 wide playfield sits at x=2560 in the
-    // settings and at x=3840 in the ini's desktop at 150%. Measured on
-    // real cabinets over 121 tables: position 2560 x 1.5 = 3840, the
-    // ini's windows land within 5 px.
+    let mut saved_monitor = saved_monitor;
+    // the one number the files cannot give is the position; answers are
+    // taken as the Windows display settings show them and the ini's space
+    // is the settings divided by the scaling, size and position alike -
+    // the ini, the B2S server and vpinmame see a 150% desktop at 2/3.
+    // Measured over 121 tables on a real cabinet: settings 2560x2880 at
+    // 2560,0 with 150% is 1707x1920 at 1707,0 in the ini's space, and
+    // the ini's windows land within 4 px of the painted DMD windows.
     let mut scaling = prompt_number(
         "  scaling of the backglass monitor in percent, from the Windows display settings (150 for 150%)",
         answers.scaling.map(|v| v as f64).unwrap_or(100.0),
@@ -592,6 +610,29 @@ pub fn run(args: &WizardArgs) -> io::Result<()> {
         )));
     }
     let mut scale = scaling / 100.0;
+    // a monitor saved by the old multiplying model (3840,0,3840x4320 for
+    // a 2560x2880 panel at 150%) sits at settings * scaling; the model
+    // stores settings / scaling, so such a value is scale^2 too large -
+    // recognize it by the ScreenRes size and fix it before it becomes
+    // the default of the questions
+    if let Some(m) = saved_monitor
+        && let Some((w, _)) = screenres_info.and_then(|i| i.backglass)
+        && scale > 1.01
+        && (m.w - w * scale).abs() < 0.15 * (w * scale)
+    {
+        let m2 = Rect::new(
+            m.x / scale / scale,
+            m.y / scale / scale,
+            m.w / scale / scale,
+            m.h / scale / scale,
+        );
+        crate::println!(
+            "  note: the saved monitor {} was written by the old multiplying model; reading it as the settings numbers divided by the scaling: {}",
+            rect_string(&m),
+            rect_string(&m2)
+        )?;
+        saved_monitor = Some(m2);
+    }
     // the playfield is taken as 100%: it is the primary monitor, and the
     // scaled desktop is anchored at its top left corner
     let mut playfield_w = prompt_number(
@@ -602,14 +643,14 @@ pub fn run(args: &WizardArgs) -> io::Result<()> {
             .unwrap_or(2560.0),
         interactive,
     )?;
-    // ScreenRes.txt and the saved monitor state the size as the display
-    // settings show it: the defaults are taken as they stand
+    // ScreenRes.txt states the settings size; the saved monitor is in the
+    // ini's space, so the defaults multiply it back by the scaling
     let mut bg_w = prompt_number(
         "  backglass screen width, as the display settings show it (its resolution)",
         screenres_info
             .and_then(|i| i.backglass)
             .map(|(w, _)| w)
-            .or_else(|| saved_monitor.map(|m| m.w))
+            .or_else(|| saved_monitor.map(|m| m.w * scale))
             .unwrap_or(2560.0),
         interactive,
     )?;
@@ -618,7 +659,7 @@ pub fn run(args: &WizardArgs) -> io::Result<()> {
         screenres_info
             .and_then(|i| i.backglass)
             .map(|(_, h)| h)
-            .or_else(|| saved_monitor.map(|m| m.h))
+            .or_else(|| saved_monitor.map(|m| m.h * scale))
             .unwrap_or(2880.0),
         interactive,
     )?;
@@ -626,7 +667,7 @@ pub fn run(args: &WizardArgs) -> io::Result<()> {
         "  backglass window position as the display settings show it, x,y (negative allowed)",
         Some(
             &saved_monitor
-                .map(|m| format!("{:.0},{:.0}", m.x / scale, m.y / scale))
+                .map(|m| format!("{:.0},{:.0}", m.x * scale, m.y * scale))
                 .unwrap_or_else(|| format!("{playfield_w:.0},0")),
         ),
         interactive,
@@ -643,10 +684,10 @@ pub fn run(args: &WizardArgs) -> io::Result<()> {
     // the DMD area, a small rectangle on the backglass monitor, and
     // windows that fit inside it can only sit on the FullDMD screen
     let candidate = Geometry {
-        x: px * scale,
-        y: py * scale,
+        x: px / scale,
+        y: py / scale,
     }
-    .monitor(bg_w, bg_h);
+    .monitor(bg_w / scale, bg_h / scale);
     let guess = guess_ini_target(&ini, candidate, screenres_info);
     if let Some((_, why)) = &guess {
         crate::println!("{why}")?;
@@ -673,7 +714,8 @@ pub fn run(args: &WizardArgs) -> io::Result<()> {
     // ini-space rectangle
     loop {
         let problems = sanity_problems(
-            Rect::new(px * scale, py * scale, bg_w, bg_h),
+            Rect::new(px / scale, py / scale, bg_w / scale, bg_h / scale),
+            scale,
             playfield_w,
             &ini,
             screenres_info,
@@ -686,7 +728,7 @@ pub fn run(args: &WizardArgs) -> io::Result<()> {
             crate::println!("    check: {p}")?;
         }
         crate::println!(
-            "  the sizes go into the ini's space as they stand; the position is multiplied by the scaling ({scaling:.0}%): x=2560 at 150% is x=3840 in the ini's desktop"
+            "  the ini's space is the display settings divided by the scaling ({scaling:.0}%): 2560x2880 at 2560,0 with 150% is 1707x1920 at 1707,0"
         )?;
         if confirm("  the values look off, keep them anyway", interactive)? {
             break;
@@ -730,15 +772,17 @@ pub fn run(args: &WizardArgs) -> io::Result<()> {
         px = nx;
         py = ny;
     }
-    // the ini's space: the sizes as answered, the position times the scaling
+    // the ini's space: settings divided by the scaling, sizes and position
     let geometry = Geometry {
-        x: px * scale,
-        y: py * scale,
+        x: px / scale,
+        y: py / scale,
     };
+    let bgw = bg_w / scale;
+    let bgh = bg_h / scale;
     crate::println!(
-        "  the backglass monitor: {} - in the ini's space: {}",
-        settings_string(geometry.monitor(bg_w, bg_h), scale),
-        rect_string(&geometry.monitor(bg_w, bg_h))
+        "  the backglass monitor: {} (display settings) = {} in the ini's space",
+        settings_string(geometry.monitor(bgw, bgh), scale),
+        rect_string(&geometry.monitor(bgw, bgh))
     )?;
 
     // ---- step 3: scan (hole detection + ini lookup)
@@ -752,7 +796,7 @@ pub fn run(args: &WizardArgs) -> io::Result<()> {
         screenres: screenres.as_deref(),
         playfield_w: Some(playfield_w as i64),
         scaling: Some(scaling as i64),
-        monitor: Some(&rect_string(&geometry.monitor(bg_w, bg_h))),
+        monitor: Some(&rect_string(&geometry.monitor(bgw, bgh))),
         ini_target: Some(&ini_target_s),
         vpx_executable: vpx.as_deref(),
     })?;
@@ -769,7 +813,7 @@ pub fn run(args: &WizardArgs) -> io::Result<()> {
         glass_roughness: 0.0,
         aspect: super::Aspect::Hole,
         native_grid: None,
-        backglass_monitor: geometry.monitor(bg_w, bg_h),
+        backglass_monitor: geometry.monitor(bgw, bgh),
         limit: None,
         jobs: args.jobs,
         ini_extra: Vec::new(),
@@ -786,7 +830,7 @@ pub fn run(args: &WizardArgs) -> io::Result<()> {
     // ---- step 4: the candidate from the screen geometry, corrected by the
     // tables' own data: the median signed offset of the mapped ini rect to
     // the detected window is where the candidate is wrong, in desktop pixels
-    let mut monitor = geometry.monitor(bg_w, bg_h);
+    let mut monitor = geometry.monitor(bgw, bgh);
     crate::println!("step 4: verifying against the tables' own data")?;
     crate::println!(
         "  from the screen geometry: {} ({} in the ini's space)",
@@ -810,7 +854,7 @@ pub fn run(args: &WizardArgs) -> io::Result<()> {
         )?;
         if (ew - monitor.w).abs() > monitor.w * 0.10 || (eh - monitor.h).abs() > monitor.h * 0.10 {
             crate::println!(
-                "  a size this far off usually means the scaling was answered with the size: the sizes go into the ini's space as they stand, only the position is multiplied by the scaling"
+                "  a size this far off usually means the scaling was multiplied where the wizard divides, or the ini describes an older screen setup"
             )?;
             if confirm("  adopt the measured size", true)? {
                 monitor.w = ew;
@@ -868,8 +912,8 @@ pub fn run(args: &WizardArgs) -> io::Result<()> {
         let r = answer
             .parse::<Rect>()
             .map_err(|e| io::Error::other(format!("not a monitor rectangle {answer:?}: {e}")))?;
-        // typed in the user's numbers: the sizes stand, the position scales
-        Rect::new(r.x * scale, r.y * scale, r.w, r.h)
+        // typed in the user's numbers: the ini's space divides by the scaling
+        Rect::new(r.x / scale, r.y / scale, r.w / scale, r.h / scale)
     };
     if !confirm("write it to the vpxtool config file", interactive)? {
         crate::println!(
@@ -947,7 +991,7 @@ mod tests {
     }
 
     #[test]
-    fn the_v6_screenres_has_the_backglass_size_in_the_ini_space() {
+    fn the_v6_screenres_carries_the_backglass_size() {
         let dir = std::env::temp_dir().join("vpxtool-screenres-v6-test");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -1001,6 +1045,7 @@ virtualdmd height=300
         // x 2700..5100, y 100..2800: a monitor at 2560,0,2560,2880 holds it
         let ok = sanity_problems(
             Rect::new(2560.0, 0.0, 2560.0, 2880.0),
+            1.0,
             2560.0,
             &ini,
             None,
@@ -1041,6 +1086,7 @@ virtualdmd height=200
         let ini = ini_fixture(&dir, "many.ini", &many);
         let ok = sanity_problems(
             Rect::new(2560.0, 0.0, 2560.0, 2880.0),
+            1.0,
             2560.0,
             &ini,
             None,
@@ -1049,6 +1095,7 @@ virtualdmd height=200
         assert!(!ok.iter().any(|p| p.contains("fall outside")), "{ok:?}");
         let bad = sanity_problems(
             Rect::new(0.0, 0.0, 2560.0, 1440.0),
+            1.0,
             2560.0,
             &ini,
             None,
@@ -1152,6 +1199,7 @@ virtualdmd height=200
         // the physical panel size, not the ini's size: more than 20% off
         let problems = sanity_problems(
             Rect::new(2560.0, 0.0, 1707.0, 1920.0),
+            1.0,
             2560.0,
             &ini,
             Some(sr),
@@ -1164,12 +1212,29 @@ virtualdmd height=200
         // agreeing is silent
         let quiet = sanity_problems(
             Rect::new(2560.0, 0.0, 2560.0, 2880.0),
+            1.0,
             2560.0,
             &ini,
             Some(sr),
             crate::b2s::IniTarget::Backglass,
         );
         assert!(!quiet.iter().any(|p| p.contains("ScreenRes")), "{quiet:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_bare_number_screenres_is_read_by_position() {
+        // real files ship without the comment scaffolding; the numbers
+        // then sit in the V6 order, one per line
+        let dir = std::env::temp_dir().join("vpxtool-bare-sr");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("ScreenRes.txt");
+        std::fs::write(&path, "2560\n1440\n2560\n2880\n1\n0\n5\n0\n0\n0\n0\n0\n").unwrap();
+        let info = read_screenres(&path).unwrap();
+        assert_eq!((info.playfield_w, info.playfield_h), (2560.0, 1440.0));
+        assert_eq!(info.backglass, Some((2560.0, 2880.0)));
+        assert_eq!(info.bg_pos, (0.0, 5.0));
+        assert_eq!(info.dmd_area, None); // 0x0 means not in use
         std::fs::remove_dir_all(&dir).ok();
     }
 

@@ -243,32 +243,30 @@ fn annotate_b2s_comments(out: &str, doc: &toml::Table) -> String {
         .get("b2s_backglass_monitor")
         .and_then(|v| v.as_str())
         .and_then(|t| t.parse::<crate::b2s::Rect>().ok());
-    // the numbers as the Windows display settings show them: the size
-    // stands, the position is the stored one divided by the scaling
+    // the numbers as the Windows display settings show them: the ini's
+    // space multiplied by the scaling, size and position alike
     let mut monitor_comment: Vec<String> = [
-        "# the backglass monitor in the ini's desktop space: the size is what",
-        "# the Windows display settings show, the position is multiplied by",
-        "# the scaling of the backglass monitor - the B2S server, vpinmame",
-        "# and DmdDevice.ini live in that scaled desktop",
+        "# the backglass monitor in the coordinate space of DmdDevice.ini:",
+        "# the Windows display settings divided by the scaling below, size",
+        "# and position alike - the B2S server, vpinmame and DmdDevice.ini",
+        "# see the whole desktop at that reduced size",
     ]
     .iter()
     .map(|s| s.to_string())
     .collect();
     match (scaling, monitor) {
         (Some(s), Some(m)) if s != 100 => {
-            let f = 100.0 / s as f64;
+            let f = s as f64 / 100.0;
             monitor_comment.push(format!(
-                "# scaling {s}%: the display settings show this monitor at {:.0},{:.0} with {:.0}x{:.0};",
+                "# scaling {s}%: the display settings show {:.0}x{:.0} at {:.0}, {:.0}; divided by {s} they become the stored {:.0}x{:.0} at {:.0}, {},",
+                m.w * f,
+                m.h * f,
                 m.x * f,
                 m.y * f,
                 m.w,
-                m.h
-            ));
-            monitor_comment.push(format!(
-                "# the position times {} is what is stored - x {:.0} becomes x {:.0},",
-                s as f64 / 100.0,
-                m.x * f,
-                m.x
+                m.h,
+                m.x,
+                m.y
             ));
             monitor_comment
                 .push("# that is why the numbers look off on a machine with scaling".to_string());
@@ -282,8 +280,9 @@ fn annotate_b2s_comments(out: &str, doc: &toml::Table) -> String {
     let scaling_comment: Vec<String> = [
         "# Windows scaling of the backglass monitor in percent, the way the",
         "# display settings show it; the playfield is taken as 100%. The",
-        "# wizard takes the display settings numbers and converts the",
-        "# position by this number into the ini's space above",
+        "# rectangle above is the display settings divided by this number,",
+        "# size and position - 2560x2880 at 2560,0 at 150% is 1707x1920",
+        "# at 1707,0",
     ]
     .iter()
     .map(|s| s.to_string())
@@ -943,7 +942,7 @@ mod tests {
     fn the_scaling_comments_name_the_conversion_they_hide() -> io::Result<()> {
         let doc = parse_config_doc(
             "vpx_executable = \"\"
-b2s_backglass_monitor = \"3840,0,2560,2880\"
+b2s_backglass_monitor = \"1707,0,1707,1920\"
 b2s_scaling = 150
 ",
             Path::new("vpxtool.cfg"),
@@ -959,14 +958,20 @@ b2s_scaling = 150
         // numbers the stored ones came from
         assert!(lines[at - 1].starts_with('#'));
         assert!(joined.contains("scaling 150%"), "{joined}");
-        assert!(joined.contains("2560,0 with 2560x2880"), "{joined}");
-        assert!(joined.contains("x 2560 becomes x 3840"), "{joined}");
+        assert!(
+            joined.contains("the display settings show 2560x2880 at 2560, 0"),
+            "{joined}"
+        );
+        assert!(
+            joined.contains("divided by 150 they become the stored 1707x1920 at 1707, 0"),
+            "{joined}"
+        );
         assert!(joined.contains("b2s_scaling = 150"), "{joined}");
         // the comments are only comments: the file reparses, values intact
         let reread = parse_config_doc(&joined, Path::new("vpxtool.cfg"))?;
         assert_eq!(
             reread.get("b2s_backglass_monitor").and_then(|v| v.as_str()),
-            Some("3840,0,2560,2880")
+            Some("1707,0,1707,1920")
         );
         Ok(())
     }
@@ -982,7 +987,7 @@ b2s_backglass_monitor = \"2560,0,2560,2880\"
         let out = toml::to_string_pretty(&doc).unwrap();
         let joined = annotated(&out, &doc);
         // the general explanation, no conversion of values nobody scaled
-        assert!(joined.contains("the ini's desktop space"));
+        assert!(joined.contains("coordinate space of DmdDevice.ini"));
         assert!(!joined.contains("scaling 150%"));
         assert!(!joined.contains("b2s_scaling"));
         Ok(())
