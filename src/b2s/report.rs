@@ -4,8 +4,14 @@ use crate::b2s::Aspect;
 use crate::b2s::scan::{MatchKind, Record};
 use std::io::Write;
 
+/// Which build produced this output, so a report, a json or a log can be
+/// pinned to the code that wrote it. Same string as `vpxtool --version`.
+pub fn build_tag() -> String {
+    format!("vpxtool {}", crate::cli::GIT_VERSION)
+}
+
 pub fn print(records: &[Record]) {
-    let mut out = String::new();
+    let mut out = format!("{}\n", build_tag());
     let mut exact = 0;
     let mut similar = 0;
     let mut ambiguous = 0;

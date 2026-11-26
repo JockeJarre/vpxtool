@@ -519,6 +519,8 @@ fn rect_string(r: &Rect) -> String {
 pub fn run(args: &WizardArgs) -> io::Result<()> {
     let interactive = std::io::stdin().is_terminal() && !args.yes;
 
+    crate::println!("{}", crate::b2s::report::build_tag())?;
+
     // the previous run's answers are the defaults of this one
     let answers = crate::config::b2s_answers();
 

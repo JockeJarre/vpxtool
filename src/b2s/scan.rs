@@ -371,7 +371,11 @@ fn scan_impl(args: ScanArgs, quiet: bool) -> Result<Vec<Record>, String> {
     }
     report::print(&records);
     if let Some(path) = &args.json {
-        let json = serde_json::to_string_pretty(&records).map_err(|e| e.to_string())?;
+        let envelope = serde_json::json!({
+            "tool": report::build_tag(),
+            "records": &records,
+        });
+        let json = serde_json::to_string_pretty(&envelope).map_err(|e| e.to_string())?;
         fs::write(path, json).map_err(|e| format!("write {}: {e}", path.display()))?;
         let _ = crate::eprintln!("json written to {}", path.display());
     }

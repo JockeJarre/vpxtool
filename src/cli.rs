@@ -40,7 +40,7 @@ use vpin::vpx::{ExtractResult, expanded, extractvbs, importvbs};
 use vpin::vpz;
 
 // see https://github.com/fusion-engineering/rust-git-version/issues/21
-const GIT_VERSION: &str = git_version!(
+pub const GIT_VERSION: &str = git_version!(
     args = ["--tags", "--always", "--dirty=-modified"],
     prefix = "git:",
     cargo_prefix = "cargo:",
