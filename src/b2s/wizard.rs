@@ -484,11 +484,9 @@ fn scoreview_window(
     bg_w: f64,
     bg_h: f64,
     bg_pos: (f64, f64),
-    ax: f64,
-    ay: f64,
-    aw: f64,
-    ah: f64,
+    area: (f64, f64, f64, f64),
 ) -> Option<Rect> {
+    let (ax, ay, aw, ah) = area;
     if aw <= 0.0 || ah <= 0.0 || bg_w <= 0.0 || bg_h <= 0.0 {
         return None;
     }
@@ -816,7 +814,7 @@ pub fn run(args: &WizardArgs) -> io::Result<()> {
     if let Some(sr) = screenres_info
         && let (Some((sbg_w, sbg_h)), Some((ax, ay, aw, ah))) = (sr.backglass, sr.dmd_area)
     {
-        let sv = scoreview_window(mon, sbg_w, sbg_h, sr.bg_pos, ax, ay, aw, ah);
+        let sv = scoreview_window(mon, sbg_w, sbg_h, sr.bg_pos, (ax, ay, aw, ah));
         if let Some(sv) = sv {
             let ini = Rect::new(sv.x / scale, sv.y / scale, sv.w / scale, sv.h / scale);
             crate::println!(
@@ -989,15 +987,21 @@ mod sv_tests {
         // backglass monitor 3840,0 2560x2880; ScreenRes: window 2560x2880
         // at 0,0, DMD area 100,200 800x600 -> scale 1.0: 3940,200 800x600
         let mon = Rect::new(3840.0, 0.0, 2560.0, 2880.0);
-        let sv =
-            scoreview_window(mon, 2560.0, 2880.0, (0.0, 0.0), 100.0, 200.0, 800.0, 600.0).unwrap();
+        let sv = scoreview_window(
+            mon,
+            2560.0,
+            2880.0,
+            (0.0, 0.0),
+            (100.0, 200.0, 800.0, 600.0),
+        )
+        .unwrap();
         assert_eq!(sv, Rect::new(3940.0, 200.0, 800.0, 600.0));
     }
 
     #[test]
     fn a_zero_dmd_area_has_no_window() {
         let mon = Rect::new(3840.0, 0.0, 2560.0, 2880.0);
-        assert!(scoreview_window(mon, 2560.0, 2880.0, (0.0, 0.0), 0.0, 0.0, 0.0, 0.0).is_none());
+        assert!(scoreview_window(mon, 2560.0, 2880.0, (0.0, 0.0), (0.0, 0.0, 0.0, 0.0)).is_none());
     }
 }
 
