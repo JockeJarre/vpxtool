@@ -476,6 +476,32 @@ fn residuals(records: &[Record], monitor: &Rect) -> (Vec<f64>, Vec<f64>, usize) 
     (dxs, dys, pairs)
 }
 
+/// The ScoreView window on the desktop: ScreenRes places the DMD area
+/// (ax,ay,aw,ah) at bg_pos inside the backglass window (bg_w,bg_h), and
+/// that window covers the backglass monitor `mon`.
+fn scoreview_window(
+    mon: Rect,
+    bg_w: f64,
+    bg_h: f64,
+    bg_pos: (f64, f64),
+    ax: f64,
+    ay: f64,
+    aw: f64,
+    ah: f64,
+) -> Option<Rect> {
+    if aw <= 0.0 || ah <= 0.0 || bg_w <= 0.0 || bg_h <= 0.0 {
+        return None;
+    }
+    let sx = mon.w / bg_w;
+    let sy = mon.h / bg_h;
+    Some(Rect::new(
+        mon.x + (bg_pos.0 + ax) * sx,
+        mon.y + (bg_pos.1 + ay) * sy,
+        aw * sx,
+        ah * sy,
+    ))
+}
+
 /// the monitor in the numbers the user typed: the ini's space multiplied
 /// by the scaling, sizes and position alike. What the wizard shows the
 /// user; the ini's space is what the config stores.
@@ -779,11 +805,27 @@ pub fn run(args: &WizardArgs) -> io::Result<()> {
     };
     let bgw = bg_w / scale;
     let bgh = bg_h / scale;
+    let mon = geometry.monitor(bgw, bgh);
     crate::println!(
         "  the backglass monitor: {} (display settings) = {} in the ini's space",
-        settings_string(geometry.monitor(bgw, bgh), scale),
-        rect_string(&geometry.monitor(bgw, bgh))
+        settings_string(mon, scale),
+        rect_string(&mon)
     )?;
+    // basis scoreview anchors the ini numbers on the ScoreView window, and
+    // ScreenRes says where it sits on the backglass: show that rect too
+    if let Some(sr) = screenres_info
+        && let (Some((sbg_w, sbg_h)), Some((ax, ay, aw, ah))) = (sr.backglass, sr.dmd_area)
+    {
+        let sv = scoreview_window(mon, sbg_w, sbg_h, sr.bg_pos, ax, ay, aw, ah);
+        if let Some(sv) = sv {
+            let ini = Rect::new(sv.x / scale, sv.y / scale, sv.w / scale, sv.h / scale);
+            crate::println!(
+                "  the scoreview window (the ScreenRes DMD area on it): {} (display settings) = {} in the ini's space",
+                settings_string(sv, scale),
+                rect_string(&ini)
+            )?;
+        }
+    }
 
     // ---- step 3: scan (hole detection + ini lookup)
     crate::println!("step 3: scanning tables (hole detection + ini lookup)")?;
@@ -936,6 +978,27 @@ pub fn run(args: &WizardArgs) -> io::Result<()> {
         "done. `b2s stampdmd --method ini` now maps the ini windows onto the detected DMD windows."
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod sv_tests {
+    use super::*;
+
+    #[test]
+    fn the_scoreview_window_sits_where_screenres_puts_the_dmd_area() {
+        // backglass monitor 3840,0 2560x2880; ScreenRes: window 2560x2880
+        // at 0,0, DMD area 100,200 800x600 -> scale 1.0: 3940,200 800x600
+        let mon = Rect::new(3840.0, 0.0, 2560.0, 2880.0);
+        let sv =
+            scoreview_window(mon, 2560.0, 2880.0, (0.0, 0.0), 100.0, 200.0, 800.0, 600.0).unwrap();
+        assert_eq!(sv, Rect::new(3940.0, 200.0, 800.0, 600.0));
+    }
+
+    #[test]
+    fn a_zero_dmd_area_has_no_window() {
+        let mon = Rect::new(3840.0, 0.0, 2560.0, 2880.0);
+        assert!(scoreview_window(mon, 2560.0, 2880.0, (0.0, 0.0), 0.0, 0.0, 0.0, 0.0).is_none());
+    }
 }
 
 #[cfg(test)]
