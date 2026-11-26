@@ -1328,6 +1328,7 @@ mod tests {
             b2s_screenres: None,
             b2s_playfield_width: None,
             b2s_scaling: None,
+            b2s_ini_target: None,
         };
         let labels: Vec<String> = TableOption::template_ini_options(&config)
             .iter()

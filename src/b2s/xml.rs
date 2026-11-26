@@ -73,6 +73,10 @@ pub struct B2sFile {
     pub dmd_type: Option<i64>,
     pub dual_backglass: Option<i64>,
     pub dmd: Option<DmdTag>,
+    /// every `<DMD>` element of `<Displays>`, in document order. The files in
+    /// the wild carry one Target="Backglass" tag; a FullDMD backglass carries
+    /// a Target="ScoreView" one as well, with the same rectangle.
+    pub dmds: Vec<DmdTag>,
     pub backglass_image: Option<ImageInfo>,
     pub dmd_image: Option<ImageInfo>,
     /// every `<Images>` child, in document order, for the extract command
@@ -171,11 +175,17 @@ fn handle(out: &mut B2sFile, stack: &[String], name: &str, attrs: &Attrs, want_i
         "DualBackglass" => out.dual_backglass = attr(attrs, "Value").and_then(parse_i64),
         "DMD" if in_displays => {
             let number = |key: &str| attr(attrs, key).and_then(parse_f64).unwrap_or(0.0);
-            out.dmd = Some(DmdTag {
+            let tag = DmdTag {
                 target: attr(attrs, "Target").unwrap_or("Backglass").to_string(),
                 rect: Rect::new(number("X"), number("Y"), number("W"), number("H")),
                 glass_roughness: attr(attrs, "GlassRoughness").and_then(parse_f64),
-            });
+            };
+            // the Backglass tag is "the" tag of the older files, the compat
+            // field keeps pointing at it; dmds carries all of them
+            if tag.target == "Backglass" && out.dmd.is_none() {
+                out.dmd = Some(tag.clone());
+            }
+            out.dmds.push(tag);
         }
         _ => {}
     }

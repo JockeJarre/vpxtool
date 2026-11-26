@@ -53,6 +53,9 @@ pub struct Config {
     pub b2s_dmddevice_ini: Option<String>,
     pub b2s_screenres: Option<String>,
     pub b2s_playfield_width: Option<i64>,
+    /// which window the DmdDevice.ini rectangles describe: "backglass"
+    /// (the classic grill era) or "scoreview" (the FullDMD era)
+    pub b2s_ini_target: Option<String>,
     /// the backglass monitor's display scaling in percent, as the wizard
     /// asks it; the ini's space is the physical size and position times it
     pub b2s_scaling: Option<i64>,
@@ -76,6 +79,9 @@ pub struct ResolvedConfig {
     pub b2s_dmddevice_ini: Option<String>,
     pub b2s_screenres: Option<String>,
     pub b2s_playfield_width: Option<i64>,
+    /// which window the DmdDevice.ini rectangles describe: "backglass"
+    /// (the classic grill era) or "scoreview" (the FullDMD era)
+    pub b2s_ini_target: Option<String>,
     /// the backglass monitor's display scaling in percent, as the wizard
     /// asks it; the ini's space is the physical size and position times it
     pub b2s_scaling: Option<i64>,
@@ -168,6 +174,7 @@ pub struct B2sAnswers {
     pub playfield_w: Option<i64>,
     pub scaling: Option<i64>,
     pub monitor: Option<String>,
+    pub ini_target: Option<String>,
 }
 
 /// The wizard reads these from a config it may itself be about to create
@@ -185,6 +192,7 @@ pub fn b2s_answers() -> B2sAnswers {
         playfield_w: config.b2s_playfield_width,
         scaling: config.b2s_scaling,
         monitor: config.b2s_backglass_monitor,
+        ini_target: config.b2s_ini_target,
     }
 }
 
@@ -219,6 +227,7 @@ pub struct B2sAnswersInput<'a> {
     pub playfield_w: Option<i64>,
     pub scaling: Option<i64>,
     pub monitor: Option<&'a str>,
+    pub ini_target: Option<&'a str>,
     pub vpx_executable: Option<&'a Path>,
 }
 
@@ -241,6 +250,12 @@ pub fn set_b2s_answers(a: &B2sAnswersInput<'_>) -> io::Result<PathBuf> {
     }
     if let Some(scaling) = a.scaling {
         doc.insert("b2s_scaling".to_string(), toml::Value::Integer(scaling));
+    }
+    if let Some(target) = a.ini_target {
+        doc.insert(
+            "b2s_ini_target".to_string(),
+            toml::Value::String(target.to_string()),
+        );
     }
     // the wizard's other answers, kept as the defaults of the next run;
     // keys that are not given keep their previous value
@@ -403,6 +418,7 @@ fn read_config(config_path: &Path) -> io::Result<ResolvedConfig> {
         b2s_screenres: config.b2s_screenres,
         b2s_playfield_width: config.b2s_playfield_width,
         b2s_scaling: config.b2s_scaling,
+        b2s_ini_target: config.b2s_ini_target,
     };
     Ok(resolved_config)
 }
@@ -649,6 +665,7 @@ fn write_default_config(config_file: &Path, vpx_executable: &Path) -> io::Result
         b2s_screenres: None,
         b2s_playfield_width: None,
         b2s_scaling: None,
+        b2s_ini_target: None,
     };
     write_config(config_file, &config)?;
     Ok(())
@@ -739,6 +756,7 @@ mod tests {
             b2s_screenres: None,
             b2s_playfield_width: None,
             b2s_scaling: None,
+            b2s_ini_target: None,
         }
     }
 
@@ -837,6 +855,7 @@ mod tests {
                 b2s_screenres: None,
                 b2s_playfield_width: None,
                 b2s_scaling: None,
+                b2s_ini_target: None,
             }
         );
         Ok(())
@@ -986,6 +1005,7 @@ mod tests {
                 b2s_screenres: None,
                 b2s_playfield_width: None,
                 b2s_scaling: None,
+                b2s_ini_target: None,
             }
         );
         Ok(())
@@ -1029,6 +1049,7 @@ mod tests {
                 b2s_screenres: None,
                 b2s_playfield_width: None,
                 b2s_scaling: None,
+                b2s_ini_target: None,
             }
         );
         Ok(())
@@ -1174,6 +1195,7 @@ tables_scan_max_depth = 2
             b2s_screenres: None,
             b2s_playfield_width: None,
             b2s_scaling: None,
+            b2s_ini_target: None,
         };
 
         // Must not panic; the broken ini is treated as unparseable.
@@ -1213,6 +1235,7 @@ tables_scan_max_depth = 2
             b2s_screenres: None,
             b2s_playfield_width: None,
             b2s_scaling: None,
+            b2s_ini_target: None,
         };
 
         assert_eq!(

@@ -16,7 +16,7 @@ use crate::b2s::report;
 use crate::b2s::rom;
 use crate::b2s::stamp;
 use crate::b2s::xml::{self as b2s, B2sFile};
-use crate::b2s::{Aspect, Grid, Method, Rect, default_ini};
+use crate::b2s::{Aspect, Grid, IniTarget, Method, Rect, default_ini};
 
 /// The extensions that hold the backglass XML. The real world is messy: `.B2SPro`
 /// and `.directb2sPRO` turn up in the same folder as `.directb2s`, and
@@ -95,6 +95,13 @@ pub struct ScanArgs {
     /// extra places to look for DmdDevice.ini, e.g. the configured pinmame
     /// folder, tried before the standard locations
     pub ini_extra: Vec<PathBuf>,
+
+    /// which window the ini's DMD rectangles are placed on. `ScoreView` maps
+    /// them through the ScreenRes.txt DMD area instead of the monitor
+    pub ini_target: super::IniTarget,
+
+    /// ScreenRes.txt data, needed to map ScoreView-based ini windows
+    pub screenres: Option<super::wizard::ScreenResInfo>,
 }
 
 pub fn default_jobs() -> usize {
@@ -113,6 +120,8 @@ struct Policy {
     /// backglass monitor, desktop pixels
     backglass: Rect,
     want_images: bool,
+    ini_target: super::IniTarget,
+    screenres: Option<super::wizard::ScreenResInfo>,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug, Serialize, Default)]
@@ -148,8 +157,25 @@ pub struct Record {
     pub rom: Option<String>,
     pub rom_source: Option<String>,
     pub ini_section: bool,
+    /// raw ini window, desktop pixels; not in the JSON: `ini_px` carries it
+    /// in the comparable form
+    #[serde(skip_serializing, default)]
     pub ini_rect: Option<Rect>,
+    /// the ini window as `"x,y,w,h"` desktop px, plus the same window
+    /// converted to backglass image pixels in parentheses:
+    /// `"1283,-846,2560,2880 (760,2320,1475,376)"`. Every other rectangle in
+    /// a record is backglass image pixels, so all of them can be compared.
+    #[serde(default)]
+    pub ini_px: Option<String>,
     pub existing_dmd: Option<Rect>,
+    /// every `<DMD Target=...>` the file carries, as (target, rect). The
+    /// FullDMD backglasses of the ScoreView era carry two of them
+    #[serde(default)]
+    pub existing_tags: Vec<(String, Rect)>,
+    /// the file has a `DMDImage` element: the FullDMD canvas, the prerequisite
+    /// for a Target="ScoreView" stamp
+    #[serde(default)]
+    pub has_dmd_image: bool,
     pub grill_height: Option<f64>,
     pub backglass_size: Option<(u32, u32)>,
     pub dmd_image_size: Option<(u32, u32)>,
@@ -218,6 +244,8 @@ fn scan_impl(args: ScanArgs, quiet: bool) -> Result<Vec<Record>, String> {
         native,
         backglass: args.backglass_monitor,
         want_images: !args.no_hole,
+        ini_target: args.ini_target,
+        screenres: args.screenres,
     };
 
     let work: Vec<Work> = match &args.target {
@@ -532,6 +560,12 @@ fn analyze(
     if let Some(tag) = &file.dmd {
         rec.existing_dmd = Some(tag.rect);
     }
+    rec.existing_tags = file
+        .dmds
+        .iter()
+        .map(|t| (t.target.clone(), t.rect))
+        .collect();
+    rec.has_dmd_image = file.images.iter().any(|i| i.element == "DMDImage");
 
     // ROM name: sidecar .vbs first, then the script embedded in the .vpx
     if let Some(vpx) = vpx {
@@ -555,8 +589,23 @@ fn analyze(
         rec.ini_section = dmd.section_found;
         rec.ini_rect = dmd.rect();
         if let (Some(window), Some((w, h))) = (rec.ini_rect, rec.backglass_size) {
-            rec.ini_in_image = Some(to_image_space(window, (w, h), policy));
+            rec.ini_in_image = match policy.ini_target {
+                IniTarget::Backglass => Some(to_image_space(window, (w, h), policy)),
+                IniTarget::ScoreView => match to_scoreview_space(window, policy, (w, h)) {
+                    Some(r) => Some(r),
+                    None => {
+                        rec.notes.push(
+                            "no DMD area in ScreenRes.txt: the ini window was mapped as if it sat on the backglass".into(),
+                        );
+                        Some(to_image_space(window, (w, h), policy))
+                    }
+                },
+            };
         }
+        rec.ini_px = rec.ini_rect.map(|r| match rec.ini_in_image {
+            Some(m) => format!("{} ({})", r.to_csv(), m.to_csv()),
+            None => r.to_csv(),
+        });
         if !dmd.section_found {
             rec.notes
                 .push(format!("no [{rom}] section in DmdDevice.ini"));
@@ -617,7 +666,13 @@ fn analyze(
     if let Some((rect, source)) = pick(policy, rec) {
         rec.chosen = Some(rect);
         rec.source = Some(source.to_string());
-    } else if !has_grill(rec) {
+        if !has_grill(rec) {
+            rec.notes.push(
+                "no grill strip: Target=\"Backglass\" omitted, stamped Target=\"ScoreView\" only"
+                    .to_string(),
+            );
+        }
+    } else if !has_grill(rec) && !rec.has_dmd_image {
         let grill = rec.grill_height.unwrap_or(0.0);
         if grill <= 0.0 {
             if rec.hole_backglass.is_some() {
@@ -669,6 +724,25 @@ fn analyze(
 pub const MIN_GRILL_PX: f64 = 10.0;
 pub const MIN_GRILL_FRAC: f64 = 0.01;
 
+/// Which `<DMD>` elements this record's file supports: `Target="Backglass"`
+/// over a real grill strip, `Target="ScoreView"` over the FullDMD canvas (a
+/// `DMDImage` in the file). Both carry the same rectangle: on a grill table
+/// the ScoreView window overlays the grill cut-out, and the user-authored
+/// ScoreView-era files write the two elements with one rectangle.
+pub fn stamp_targets(rec: &Record) -> Vec<(String, Rect)> {
+    let Some(rect) = rec.chosen else {
+        return Vec::new();
+    };
+    let mut targets = Vec::new();
+    if has_grill(rec) {
+        targets.push(("Backglass".to_string(), rect));
+    }
+    if rec.has_dmd_image {
+        targets.push(("ScoreView".to_string(), rect));
+    }
+    targets
+}
+
 /// Is there a grill strip that could hold a DMD window?
 fn has_grill(rec: &Record) -> bool {
     let Some(g) = rec.grill_height.filter(|g| *g >= MIN_GRILL_PX) else {
@@ -701,6 +775,7 @@ fn authored_tag(rec: &Record) -> Option<Rect> {
 /// the 8 false stamps of one library had no tag, and most had no DMDImage.
 fn has_dmd_evidence(rec: &Record) -> bool {
     rec.ini_section
+        || rec.has_dmd_image
         || rec.dmd_image_size.is_some()
         || rec.rom.is_some()
         || authored_tag(rec).is_some()
@@ -708,10 +783,11 @@ fn has_dmd_evidence(rec: &Record) -> bool {
 
 /// The rectangle to stamp and where it came from.
 fn pick(policy: Policy, rec: &Record) -> Option<(Rect, &'static str)> {
-    // A real grill strip is the prerequisite for every stamp: a backglass
-    // without one has no DMD cut-out, and the tracer finds flat bands of the
-    // artwork instead.
-    if !has_grill(rec) {
+    // A real grill strip opens the Target="Backglass" door, a DMDImage opens
+    // the Target="ScoreView" door; a file with neither gets no stamp at all:
+    // without one of them there is no DMD anywhere, and the tracer finds flat
+    // bands of the artwork instead.
+    if !has_grill(rec) && !rec.has_dmd_image {
         return None;
     }
     // The hole and the template box are the two *derived* rectangles. They are
@@ -764,6 +840,42 @@ fn pick(policy: Policy, rec: &Record) -> Option<(Rect, &'static str)> {
         }
     }
     Some((rect, rect_and_source.1))
+}
+
+/// The ini window sits on the ScoreView (FullDMD) window: normalize it
+/// against the ScoreView rectangle on the desktop - the backglass monitor's
+/// position plus the ScreenRes.txt DMD area, scaled from the B2S window size
+/// to the monitor - and paint that position onto the DMD area inside the
+/// backglass image, which is where the DMDImage canvas covers the image.
+fn to_scoreview_space(window: Rect, policy: Policy, image: (u32, u32)) -> Option<Rect> {
+    let sr = policy.screenres?;
+    let (bg_w, bg_h) = sr.backglass?;
+    let (ax, ay, aw, ah) = sr.dmd_area?;
+    if aw <= 0.0 || ah <= 0.0 || bg_w <= 0.0 || bg_h <= 0.0 {
+        return None;
+    }
+    let mon = policy.backglass;
+    let sx = mon.w / bg_w;
+    let sy = mon.h / bg_h;
+    let scoreview = Rect::new(
+        mon.x + (sr.bg_pos.0 + ax) * sx,
+        mon.y + (sr.bg_pos.1 + ay) * sy,
+        aw * sx,
+        ah * sy,
+    );
+    let nx = (window.x - scoreview.x) / scoreview.w;
+    let ny = (window.y - scoreview.y) / scoreview.h;
+    let nw = window.w / scoreview.w;
+    let nh = window.h / scoreview.h;
+    let ix = image.0 as f64 / bg_w;
+    let iy = image.1 as f64 / bg_h;
+    let canvas = Rect::new(ax * ix, ay * iy, aw * ix, ah * iy);
+    Some(Rect::new(
+        canvas.x + nx * canvas.w,
+        canvas.y + ny * canvas.h,
+        nw * canvas.w,
+        nh * canvas.h,
+    ))
 }
 
 /// The ini window in backglass image pixels: the backglass image covers the
@@ -1033,6 +1145,47 @@ mod tests {
     }
 
     #[test]
+    fn a_scoreview_based_ini_window_maps_through_the_dmd_area() {
+        // the monitor is twice the B2S window size, so the ScoreView window
+        // on the desktop is the DMD area times two
+        let policy = Policy {
+            backglass: Rect::new(4000.0, 0.0, 4000.0, 4000.0),
+            ini_target: IniTarget::ScoreView,
+            screenres: Some(crate::b2s::wizard::ScreenResInfo {
+                playfield_w: 2000.0,
+                playfield_h: 2000.0,
+                backglass: Some((2000.0, 2000.0)),
+                dmd_area: Some((100.0, 200.0, 800.0, 600.0)),
+                bg_pos: (0.0, 0.0),
+            }),
+            ..test_policy()
+        };
+        // the ScoreView window on the desktop: 4000 + 100*2, 0 + 200*2,
+        // 800*2, 600*2 = 4200,400,1600,1200. the ini window sits in its
+        // top left quadrant: 4200,400,800,600 -> normalized 0,0,0.5,0.5
+        let window = Rect::new(4200.0, 400.0, 800.0, 600.0);
+        // the DMD area inside the 1000x1000 image: 100*0.5, 200*0.5,
+        // 800*0.5, 600*0.5 = 50,100,400,300 -> the quadrant of that: 50,100,200,150
+        let got = to_scoreview_space(window, policy, (1000, 1000)).unwrap();
+        assert_eq!(
+            (got.x as i32, got.y as i32, got.w as i32, got.h as i32),
+            (50, 100, 200, 150)
+        );
+    }
+
+    fn test_policy() -> Policy {
+        Policy {
+            method: Method::Hole,
+            aspect: Aspect::Hole,
+            native: None,
+            backglass: Rect::new(2560.0, 0.0, 2560.0, 2880.0),
+            want_images: true,
+            ini_target: IniTarget::Backglass,
+            screenres: None,
+        }
+    }
+
+    #[test]
     fn rect_parses_a_monitor() {
         assert_eq!(
             "2560,0,2560,2880".parse::<Rect>().unwrap(),
@@ -1050,6 +1203,8 @@ mod tests {
             native: None,
             backglass: "2560,0,2560,2880".parse().unwrap(),
             want_images: false,
+            ini_target: Default::default(),
+            screenres: None,
         };
         // afm_113b: a window at the left edge of the backglass monitor lands at
         // the left edge of a 2000 px image, scaled by 2000/2560
@@ -1068,12 +1223,15 @@ mod tests {
             native: Some(4.0),
             backglass: "2560,0,2560,2880".parse().unwrap(),
             want_images: false,
+            ini_target: Default::default(),
+            screenres: None,
         };
         let rec = Record {
             hole_backglass: Some(Rect::new(504.0, 1287.0, 949.0, 164.0)),
             backglass_size: Some((2000, 1565)),
             grill_height: Some(300.0),
             dmd_image_size: Some((1920, 480)),
+            has_dmd_image: true,
             ..Default::default()
         };
         assert_eq!(
@@ -1090,6 +1248,8 @@ mod tests {
             native: Some(2.0),
             backglass: "2560,0,2560,2880".parse().unwrap(),
             want_images: false,
+            ini_target: Default::default(),
+            screenres: None,
         };
         let rec = Record {
             hole_backglass: Some(Rect::new(10.0, 900.0, 1000.0, 100.0)),
@@ -1113,6 +1273,8 @@ mod tests {
             native: None,
             backglass: "2560,0,2560,2880".parse().unwrap(),
             want_images: true,
+            ini_target: Default::default(),
+            screenres: None,
         };
         let rec = Record {
             hole_dmd_image: Some(Rect::new(111.0, 618.0, 1696.0, 419.0)),
@@ -1130,11 +1292,14 @@ mod tests {
             native: None,
             backglass: "2560,0,2560,2880".parse().unwrap(),
             want_images: true,
+            ini_target: Default::default(),
+            screenres: None,
         };
         let rec = Record {
             grill_height: Some(180.0),
             backglass_size: Some((2000, 1565)),
             dmd_image_size: Some((1920, 480)),
+            has_dmd_image: true,
             hole_scanned: true,
             ..Default::default()
         };
@@ -1152,6 +1317,8 @@ mod tests {
             native: None,
             backglass: "2560,0,2560,2880".parse().unwrap(),
             want_images: true,
+            ini_target: Default::default(),
+            screenres: None,
         };
         // Raven (Gottlieb 1986): a 471x76 stripe in the grill band, 6.2:1. The
         // tracer saw it, the DMD-shape filter rejected it. The file has a grill
@@ -1161,6 +1328,7 @@ mod tests {
             grill_height: Some(304.0),
             backglass_size: Some((1280, 1024)),
             dmd_image_size: Some((696, 232)),
+            has_dmd_image: true,
             hole_scanned: true,
             hole_seen: 1,
             ..Default::default()
@@ -1176,11 +1344,14 @@ mod tests {
             native: None,
             backglass: "2560,0,2560,2880".parse().unwrap(),
             want_images: false,
+            ini_target: Default::default(),
+            screenres: None,
         };
         let rec = Record {
             grill_height: Some(304.0),
             backglass_size: Some((1280, 1024)),
             dmd_image_size: Some((696, 232)),
+            has_dmd_image: true,
             ..Default::default()
         };
         assert_eq!(pick(policy, &rec), None);
@@ -1194,6 +1365,8 @@ mod tests {
             native: None,
             backglass: "2560,0,2560,2880".parse().unwrap(),
             want_images: true,
+            ini_target: Default::default(),
+            screenres: None,
         };
         // no grill, no hole, no ini, no authored tag: nothing says a DMD
         // window exists, so the file must stay untouched
@@ -1218,6 +1391,8 @@ mod tests {
             native: None,
             backglass: "2560,0,2560,2880".parse().unwrap(),
             want_images: true,
+            ini_target: Default::default(),
+            screenres: None,
         };
         let authored = Rect::new(500.0, 1240.0, 1024.0, 216.0);
         let rec = Record {
@@ -1247,6 +1422,8 @@ mod tests {
             native: None,
             backglass: "2560,0,2560,2880".parse().unwrap(),
             want_images: true,
+            ini_target: Default::default(),
+            screenres: None,
         };
         let rec = Record {
             existing_dmd: Some(Rect::new(500.0, 1240.0, 1024.0, 216.0)),
@@ -1266,6 +1443,8 @@ mod tests {
             native: None,
             backglass: "2560,0,2560,2880".parse().unwrap(),
             want_images: true,
+            ini_target: Default::default(),
+            screenres: None,
         };
         // Elvira and the Party Monsters: the 8.9:1 stripe that an older run
         // wrote is not a DMD window, even though it is now a tag in the file.
@@ -1274,6 +1453,7 @@ mod tests {
             backglass_size: Some((2200, 2200)),
             grill_height: Some(306.0),
             dmd_image_size: Some((1920, 480)),
+            has_dmd_image: true,
             hole_scanned: true,
             hole_seen: 1,
             ..Default::default()
@@ -1289,6 +1469,8 @@ mod tests {
             native: None,
             backglass: "2560,0,2560,2880".parse().unwrap(),
             want_images: true,
+            ini_target: Default::default(),
+            screenres: None,
         };
         let rec = Record {
             hole_backglass: Some(Rect::new(500.0, 1240.0, 1024.0, 216.0)),
@@ -1324,6 +1506,8 @@ mod tests {
             native: None,
             backglass: "2560,0,2560,2880".parse().unwrap(),
             want_images: true,
+            ini_target: Default::default(),
+            screenres: None,
         };
         // Heavy Metal (Rowamet 1983): a plausible 4.5:1 flat rectangle in the
         // art, but the backglass has no DMDImage, no tag and no ini section.
@@ -1340,6 +1524,7 @@ mod tests {
         // once the backglass carries a DMD image, the same hole is evidence
         let rec = Record {
             dmd_image_size: Some((1920, 480)),
+            has_dmd_image: true,
             ..rec
         };
         assert_eq!(pick(policy, &rec), Some((hole, "hole")));
@@ -1353,6 +1538,8 @@ mod tests {
             native: None,
             backglass: "2560,0,2560,2880".parse().unwrap(),
             want_images: true,
+            ini_target: Default::default(),
+            screenres: None,
         };
         let rec = Record {
             grill_height: Some(300.0),
@@ -1379,6 +1566,8 @@ mod tests {
                 native: None,
                 backglass: "2560,0,2560,2880".parse().unwrap(),
                 want_images: true,
+                ini_target: Default::default(),
+                screenres: None,
             };
             let rec = Record {
                 hole_backglass: Some(hole),
@@ -1388,6 +1577,7 @@ mod tests {
                 ini_section: true,
                 backglass_size: Some((2000, 1565)),
                 grill_height: Some(2.0),
+                has_dmd_image: false,
                 hole_scanned: true,
                 ..Default::default()
             };
@@ -1403,6 +1593,8 @@ mod tests {
             native: None,
             backglass: "2560,0,2560,2880".parse().unwrap(),
             want_images: true,
+            ini_target: Default::default(),
+            screenres: None,
         };
         let hole = Rect::new(300.0, 700.0, 600.0, 160.0);
         // Bone Busters Inc.: 10 px on a 944 px image is just over 1 %
@@ -1411,6 +1603,7 @@ mod tests {
             dmd_image_size: Some((1920, 480)),
             backglass_size: Some((1259, 944)),
             grill_height: Some(10.0),
+            has_dmd_image: false,
             ..Default::default()
         };
         assert_eq!(pick(policy, &rec), Some((hole, "hole")));

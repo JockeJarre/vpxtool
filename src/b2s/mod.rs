@@ -28,7 +28,19 @@ use std::str::FromStr;
 use serde::Serialize;
 
 /// A rectangle in image pixels.
-#[derive(Clone, Copy, PartialEq, Debug, Default, Serialize)]
+/// Serialized as one `"x,y,w,h"` string: a record's rects all live in the
+/// same coordinate space (backglass image pixels), so the eye can subtract
+/// them. `x,y,w,h` is what the DMD tag itself uses.
+impl Serialize for Rect {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&format!(
+            "{:.0},{:.0},{:.0},{:.0}",
+            self.x, self.y, self.w, self.h
+        ))
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
 pub struct Rect {
     pub x: f64,
     pub y: f64,
@@ -37,6 +49,11 @@ pub struct Rect {
 }
 
 impl Rect {
+    /// `"x,y,w,h"`, the format of the DMD tag attributes, rounded to pixels
+    pub fn to_csv(&self) -> String {
+        format!("{:.0},{:.0},{:.0},{:.0}", self.x, self.y, self.w, self.h)
+    }
+
     pub fn new(x: f64, y: f64, w: f64, h: f64) -> Self {
         Rect { x, y, w, h }
     }
@@ -78,6 +95,42 @@ impl std::str::FromStr for Rect {
 impl Display for Rect {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{:.0},{:.0} {:.0}x{:.0}", self.x, self.y, self.w, self.h)
+    }
+}
+
+/// Which window the DMD rectangles of `DmdDevice.ini` describe. The classic
+/// cabinets cut the DMD out of the backglass, and the ini windows sit on the
+/// backglass monitor above that cut-out. The FullDMD cabinets show the DMD on
+/// their own ScoreView window over the `DMDImage` canvas, and the ini windows
+/// sit on that window: mapping them into the backglass image then goes through
+/// the ScreenRes.txt DMD area.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum IniTarget {
+    /// the ini windows are placed on the backglass (the classic grill era)
+    #[default]
+    Backglass,
+    /// the ini windows are placed on the ScoreView (FullDMD) window
+    ScoreView,
+}
+
+impl Display for IniTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            IniTarget::Backglass => "backglass",
+            IniTarget::ScoreView => "scoreview",
+        };
+        f.write_str(s)
+    }
+}
+
+impl FromStr for IniTarget {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_ascii_lowercase().as_str() {
+            "backglass" => Ok(IniTarget::Backglass),
+            "scoreview" => Ok(IniTarget::ScoreView),
+            other => Err(format!("unknown ini target {other} (backglass, scoreview)")),
+        }
     }
 }
 

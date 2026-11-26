@@ -184,7 +184,7 @@ vpxtool b2s extract backglass-folder/   # every .directb2s/.b2spro in the folder
 
 Accepts files, folders (all `.directb2s`/`.b2spro` inside), or a mix; `b2s import` takes the same.
 
-`b2s stampdmd` writes the `<DMD Target="Backglass" X=".." Y=".." W=".." H=".." GlassRoughness=".."/>` element into the backglass files, so B2S renders the rom's DMD inside the grill window (the punch-out). The rectangle is detected from the file itself by locating the DMD window of the grill strip in the embedded backglass image; when no window is found, the position configured for the table's rom (the `cGameName` from the table script, sidecar `.vbs` first) in `DmdDevice.ini` is mapped into the backglass image. The files are edited in place and the base64 payloads are copied through untouched, so only the DMD element changes; a `.bak` copy is kept unless `--no-backup`. Without `--write` this is a dry run. The path can be a folder tree, one `.vpx` or one `.directb2s`/`.b2spro`; the partner file of a matching name is found next to it. A file that already carries a `<DMD>` tag is the marker of a finished backglass - authored by a B2S editor or stamped by an earlier run - and is left alone; `--force` overwrites it.
+`b2s stampdmd` writes the `<DMD Target=".." X=".." Y=".." W=".." H=".." GlassRoughness=".."/>` element into the backglass files, so B2S renders the rom's DMD in the right window. `Target` is `Backglass` when the file has a grill strip (the classic punch-out in the backglass) and `ScoreView` when it carries a `DMDImage` (the FullDMD canvas); a file with both gets both elements, in one `<Displays>` block. The rectangle is detected from the file itself by locating the DMD window of the grill strip in the embedded backglass image; when no window is found, the position configured for the table's rom (the `cGameName` from the table script, sidecar `.vbs` first) in `DmdDevice.ini` is mapped into the backglass image. The files are edited in place and the base64 payloads are copied through untouched, so only the DMD element changes; a `.bak` copy is kept unless `--no-backup`. Without `--write` this is a dry run. The path can be a folder tree, one `.vpx` or one `.directb2s`/`.b2spro`; the partner file of a matching name is found next to it. A file that already carries a `<DMD>` tag is the marker of a finished backglass - authored by a B2S editor or stamped by an earlier run - and is left alone; `--force` overwrites it.
 
 ```sh
 vpxtool b2s import <FILE> [-d DIR]   # put the images of a `b2s extract` folder back into the file
@@ -197,7 +197,17 @@ vpxtool b2s stampdmd tables/            # dry run over a folder tree
 vpxtool b2s stampdmd --write tables/    # write the files
 vpxtool b2s stampdmd "table.directb2s"  # one backglass, table found next to it
 vpxtool b2s stampdmd --method ini --ini DmdDevice.ini tables/
+vpxtool b2s stampdmd --ini-target scoreview tables/   # the ini windows sit on the FullDMD screen
 ```
+
+`--json out.json` writes the collected data of every table for analysis. Every
+rectangle in it is one `"x,y,w,h"` string in the **same** space - backglass
+image pixels - so the values can be compared directly: `hole_backglass`,
+`ini_in_image`, `chosen`, `existing_tags`. The one foreign-space source, the raw
+`DmdDevice.ini` window in desktop pixels, is written as `ini_px` with the
+converted value in parentheses:
+`"4463,2379,1311,408 (608,2042,1280,350)"` - the same window in the comparable
+space, so the ini's answer can be put next to the detected one.
 
 `b2s wizard <TABLES>` calibrates the ini method on your machine. Mapping the
 desktop coordinates of `DmdDevice.ini` into the backglass image needs the
@@ -217,8 +227,12 @@ two sections, and - the strongest check - the ini's own DMD windows: with
 the right monitor almost all of them fit inside it, with a wrong one almost
 none do, and a majority falling outside is reported before the scan. When
 the scan starts, all answers are saved to the config
-(`b2s_dmddevice_ini`, `b2s_screenres`, `b2s_playfield_width`) and are the
-defaults of the next run. Then
+(`b2s_dmddevice_ini`, `b2s_screenres`, `b2s_playfield_width`, `b2s_scaling`,
+`b2s_ini_target`) and are the
+defaults of the next run. Step 1 also asks which window the ini's DMD
+rectangles sit on: `backglass` (the classic grill cut-out) or `scoreview` (the
+FullDMD screen over the `DMDImage`); a `scoreview` answer maps the ini windows
+through the `ScreenRes.txt` DMD area. Then
 *verifies* the candidate against your own tables: on every table with both a
 detected DMD window and an ini section, the median offset of the mapped ini
 rect to the detected window says where the candidate is wrong, and the
@@ -326,6 +340,14 @@ tables_scan_max_depth = 3
 # before mapping into the backglass image. A 4K playfield and a 2560x2880
 # backglass monitor give:
 b2s_backglass_monitor = "3840,0,2560,2880"
+
+# the answers of `b2s wizard`: the ini, the ScreenRes.txt, the playfield
+# width, the backglass scaling, and which window the ini describes
+b2s_dmddevice_ini = "D:\vPinball\VisualPinball\DmdDevice.ini"
+b2s_screenres = "D:\vPinball\VisualPinball\ScreenRes.txt"
+b2s_playfield_width = 2560
+b2s_scaling = 150
+b2s_ini_target = "backglass"
 ```
 
 Further settings will be picked up from the Visual Pinball config.

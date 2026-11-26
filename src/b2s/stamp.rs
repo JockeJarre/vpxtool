@@ -1,11 +1,16 @@
-//! Writes the `<DMD>` element into a B2S XML file, in place, keeping the rest
-//! of the file byte-identical.
+//! Writes the `<DMD>` elements into a B2S XML file, in place, keeping the
+//! rest of the file byte-identical.
 //!
 //! These files are 25-53 MB because of the base64 images, so the edit is
 //! targeted: locate the element in the tail of the file, splice the new text
 //! in, copy everything else through unchanged. `<Displays>` is the last child
 //! of the root element in the files B2S-Pro writes, so a missing block is
 //! inserted directly before the root end tag.
+//!
+//! A file carries one `<DMD>` per display it overlays: `Target="Backglass"`
+//! for the grill cut-out, `Target="ScoreView"` for the FullDMD area between
+//! the speakers. Which of the two exist is the file's business (a grill
+//! strip, a `DMDImage`); this module plans one action per requested target.
 //!
 //! The structural tail of these files is small, so the line ending used there
 //! is detected and the inserted text follows it; the sample files use LF.
@@ -16,15 +21,15 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::b2s::Rect;
-use crate::b2s::scan::{MatchKind, Record};
+use crate::b2s::scan::{MatchKind, Record, stamp_targets};
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Action {
-    /// the file already holds this rectangle
+    /// the file already holds this rectangle for this target
     Unchanged,
-    /// rewrite the attributes of the existing `<DMD>` element
+    /// rewrite the attributes of the existing `<DMD>` element of this target
     Replace,
-    /// add a `<Displays>` block
+    /// add the element, and the `<Displays>` block around it when missing
     Insert,
 }
 
@@ -42,19 +47,21 @@ impl std::fmt::Display for Action {
 #[derive(Debug)]
 pub struct Plan {
     pub path: PathBuf,
+    /// which `<DMD Target="...">` this plan writes
+    pub target: String,
     pub action: Action,
     /// byte span that `payload` replaces; an empty span is a pure insertion
     pub span: (usize, usize),
     pub payload: String,
-    /// the rectangle currently in the file
+    /// the rectangle currently in the file for this target
     pub from: Option<Rect>,
     pub to: Rect,
 }
 
-/// The `<DMD>` element text B2S-Pro writes for this rectangle.
-pub fn tag_text(rect: Rect, glass_roughness: f64) -> String {
+/// The `<DMD>` element text B2S-Pro writes for this target and rectangle.
+pub fn tag_text(target: &str, rect: Rect, glass_roughness: f64) -> String {
     format!(
-        "<DMD Target=\"Backglass\" X=\"{:.0}\" Y=\"{:.0}\" W=\"{:.0}\" H=\"{:.0}\" GlassRoughness=\"{}\"/>",
+        "<DMD Target=\"{target}\" X=\"{:.0}\" Y=\"{:.0}\" W=\"{:.0}\" H=\"{:.0}\" GlassRoughness=\"{}\"/>",
         rect.x,
         rect.y,
         rect.w,
@@ -72,14 +79,16 @@ fn fmt_glass(v: f64) -> String {
     }
 }
 
-/// Decides what has to change, from the content of `path`.
-pub fn plan_bytes(
+/// One plan per requested target: replace the element of that target when the
+/// file has one, insert it when it does not. A plan that fails (no root end
+/// tag) fails the whole file, as before.
+pub fn plan_all(
     path: &Path,
     bytes: &[u8],
-    to: Rect,
-    current: Option<Rect>,
+    targets: &[(&str, Rect)],
+    existing: &[(&str, Rect)],
     glass_roughness: f64,
-) -> Result<Plan, String> {
+) -> Result<Vec<Plan>, String> {
     let root_end = rfind(bytes, b"</DirectB2SData>").ok_or("no </DirectB2SData> end tag")?;
     // the image payloads sit above the structural tail, so only search below
     // the end of <Images>
@@ -88,86 +97,200 @@ pub fn plan_bytes(
         .unwrap_or(0)
         .min(root_end);
     let le = line_ending(bytes, tail);
-    let tag = tag_text(to, glass_roughness);
-    // compare the way the tag is written (`{:.0}`), not the raw floats: the
-    // scan keeps the fractional rectangle, while the file holds whole pixels,
-    // so a raw compare would rewrite identical bytes on every run
-    let to_text = to.to_string();
-    // <Displays> is a child of the root, so it goes one level below the root
-    // end tag: the shape B2S-Pro writes
     let base = format!("{}    ", indent_of(bytes, root_end));
-    let block = format!("{base}<Displays>{le}{base}    {tag}{le}{base}</Displays>{le}");
-    let mut plan = Plan {
-        path: path.to_path_buf(),
-        action: Action::Insert,
-        span: (line_start(bytes, root_end), line_start(bytes, root_end)),
-        payload: block,
-        from: current,
-        to,
-    };
-    if let Some(start) = find_from(bytes, b"<Displays", tail).filter(|p| *p < root_end) {
-        if let Some(span) = dmd_tag_span(bytes, start, root_end) {
-            plan.span = span;
-            plan.action = if current.map(|r| r.to_string()) == Some(to_text) {
-                Action::Unchanged
-            } else {
-                Action::Replace
-            };
-            plan.payload = if plan.action == Action::Unchanged {
-                String::new()
-            } else {
-                tag.clone()
-            };
-            return Ok(plan);
+    // the elements the file already carries, by target
+    let mut plans = Vec::new();
+    let mut missing: Vec<(&str, Rect)> = Vec::new();
+    let spans = match find_from(bytes, b"<Displays", tail).filter(|p| *p < root_end) {
+        Some(start) => {
+            let limit = find_from(bytes, b"</Displays>", start + 9)
+                .map(|p| p + b"</Displays>".len())
+                .unwrap_or(root_end)
+                .min(root_end);
+            dmd_spans(bytes, start + 9, limit)
         }
+        None => Vec::new(),
+    };
+    for (target, to) in targets {
+        let found = spans
+            .iter()
+            .find(|(s, e)| span_target(bytes, *s, *e) == *target);
+        // the file's own attribute text wins over the scan's memory of it:
+        // compare the way the tag is written (`{:.0}`), not the raw floats,
+        // so a fractional scan result that rounds to the stored numbers is
+        // unchanged, not a rewrite of identical bytes
+        let current = found
+            .and_then(|(s, e)| span_rect(bytes, *s, *e))
+            .or_else(|| existing.iter().find(|(t, _)| t == target).map(|(_, r)| *r));
+        match found {
+            Some((s, e)) => {
+                let unchanged = current.map(|r| r.to_string()) == Some(to.to_string());
+                plans.push(Plan {
+                    path: path.to_path_buf(),
+                    target: (*target).to_string(),
+                    action: if unchanged {
+                        Action::Unchanged
+                    } else {
+                        Action::Replace
+                    },
+                    span: (*s, *e),
+                    payload: if unchanged {
+                        String::new()
+                    } else {
+                        tag_text(target, *to, glass_roughness)
+                    },
+                    from: current,
+                    to: *to,
+                });
+            }
+            None => missing.push((*target, *to)),
+        }
+    }
+    if missing.is_empty() {
+        return Ok(plans);
+    }
+    // one insert plan carries all missing targets: they append at the same
+    // point, and two plans at one point would undo each other
+    let tags: Vec<String> = missing
+        .iter()
+        .map(|(t, r)| tag_text(t, *r, glass_roughness))
+        .collect();
+    let first_to = missing[0].1;
+    if let Some((s, e)) = spans.last() {
+        // append after the last `<DMD>` line, at its indentation
+        let indent = indent_of(bytes, *s);
+        // the insertion point is the end of the last tag's line, so each new
+        // element is written as its own complete line
+        let payload: String = missing
+            .iter()
+            .map(|(t, r)| format!("{indent}{}{le}", tag_text(t, *r, glass_roughness)))
+            .collect();
+        plans.push(Plan {
+            path: path.to_path_buf(),
+            target: missing
+                .iter()
+                .map(|(t, _)| *t)
+                .collect::<Vec<_>>()
+                .join("+"),
+            action: Action::Insert,
+            span: (line_end(bytes, *e), line_end(bytes, *e)),
+            payload,
+            from: None,
+            to: first_to,
+        });
+        return Ok(plans);
+    }
+    if let Some(start) = find_from(bytes, b"<Displays", tail).filter(|p| *p < root_end) {
         // a <Displays> element with no <DMD>: replace a self-closing one, or
-        // add the tag line inside an open one
+        // add the tag lines inside an open one
         if let Some(gt) = find_from(bytes, b">", start + 9).filter(|p| *p < root_end) {
             let indent = indent_of(bytes, start);
             let inner = format!("{indent}    ");
-            if bytes[start + 9..=gt].contains(&b'/') {
-                plan.span = (start, gt + 1);
-                plan.payload = format!("{indent}<Displays>{le}{inner}{tag}{le}{indent}</Displays>");
+            let payload = if bytes[start + 9..=gt].contains(&b'/') {
+                plans.push(Plan {
+                    path: path.to_path_buf(),
+                    target: missing
+                        .iter()
+                        .map(|(t, _)| *t)
+                        .collect::<Vec<_>>()
+                        .join("+"),
+                    action: Action::Insert,
+                    span: (start, gt + 1),
+                    payload: format!(
+                        "{indent}<Displays>{le}{inner}{}{le}{indent}</Displays>",
+                        tags.join(le)
+                    ),
+                    from: None,
+                    to: first_to,
+                });
+                return Ok(plans);
             } else {
-                plan.span = (gt + 1, gt + 1);
-                plan.payload = format!("{le}{inner}{tag}");
-            }
-            return Ok(plan);
+                format!("{}{inner}{}", le, tags.join(&format!("{le}{inner}")))
+            };
+            plans.push(Plan {
+                path: path.to_path_buf(),
+                target: missing
+                    .iter()
+                    .map(|(t, _)| *t)
+                    .collect::<Vec<_>>()
+                    .join("+"),
+                action: Action::Insert,
+                span: (gt + 1, gt + 1),
+                payload,
+                from: None,
+                to: first_to,
+            });
+            return Ok(plans);
         }
     }
-    Ok(plan)
+    // no <Displays> at all: the whole block, the shape B2S-Pro writes
+    plans.push(Plan {
+        path: path.to_path_buf(),
+        target: missing
+            .iter()
+            .map(|(t, _)| *t)
+            .collect::<Vec<_>>()
+            .join("+"),
+        action: Action::Insert,
+        span: (line_start(bytes, root_end), line_start(bytes, root_end)),
+        payload: format!(
+            "{base}<Displays>{le}{base}    {}{le}{base}</Displays>{le}",
+            tags.join(&format!("{le}{base}    "))
+        ),
+        from: None,
+        to: first_to,
+    });
+    Ok(plans)
 }
 
-/// Applies the plan and returns the size of the new file. A `.bak` copy of the
-/// original is kept when `backup` is true.
-pub fn apply(plan: &Plan, bytes: &[u8], backup: bool) -> Result<usize, String> {
-    if plan.action == Action::Unchanged {
+/// Applies every plan and returns the size of the new file. The spans are
+/// disjoint by construction; the rightmost goes first so the earlier offsets
+/// stay valid. A `.bak` copy of the original is kept when `backup` is true.
+pub fn apply_all(plans: &[Plan], bytes: &[u8], backup: bool) -> Result<usize, String> {
+    let real: Vec<&Plan> = plans
+        .iter()
+        .filter(|p| p.action != Action::Unchanged)
+        .collect();
+    if real.is_empty() {
         return Ok(bytes.len());
     }
-    let (from, to) = plan.span;
-    let mut out = Vec::with_capacity(bytes.len() + plan.payload.len());
-    out.extend_from_slice(&bytes[..from]);
-    out.extend_from_slice(plan.payload.as_bytes());
-    out.extend_from_slice(&bytes[to..]);
+    let path = real[0].path.clone();
     if backup {
-        let name = plan
-            .path
+        let name = path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let bak = plan.path.with_file_name(format!("{name}.bak"));
+        let bak = path.with_file_name(format!("{name}.bak"));
         // an existing `.bak` is the oldest state this tool has seen: keep it,
         // so a second run with other options cannot overwrite the original
         if !bak.exists() {
-            fs::copy(&plan.path, &bak).map_err(|e| format!("backup {}: {e}", bak.display()))?;
+            fs::copy(&path, &bak).map_err(|e| format!("backup {}: {e}", bak.display()))?;
         }
     }
+    // the spans are disjoint, so a single forward copy does it: everything
+    // between two plans goes through byte-identical
+    let mut plans = real.clone();
+    plans.sort_by_key(|p| p.span.0);
+    let mut out =
+        Vec::with_capacity(bytes.len() + real.iter().map(|p| p.payload.len()).sum::<usize>());
+    let mut cursor = 0;
+    for plan in plans {
+        out.extend_from_slice(&bytes[cursor..plan.span.0]);
+        out.extend_from_slice(plan.payload.as_bytes());
+        cursor = plan.span.1.max(cursor);
+    }
+    out.extend_from_slice(&bytes[cursor..]);
     // write beside the original, then swap, so an interrupt cannot leave a
     // half-written backglass
-    let tmp = plan.path.with_extension("tmp");
+    let tmp = path.with_extension("tmp");
     fs::write(&tmp, &out).map_err(|e| format!("write {}: {e}", tmp.display()))?;
-    fs::rename(&tmp, &plan.path).map_err(|e| format!("replace {}: {e}", plan.path.display()))?;
+    fs::rename(&tmp, &path).map_err(|e| format!("replace {}: {e}", path.display()))?;
     Ok(out.len())
+}
+
+/// Single-plan apply, kept for callers with exactly one target.
+pub fn apply(plan: &Plan, bytes: &[u8], backup: bool) -> Result<usize, String> {
+    apply_all(std::slice::from_ref(plan), bytes, backup)
 }
 
 #[derive(Debug, Default)]
@@ -185,10 +308,12 @@ pub struct Stats {
 }
 
 /// Plans (and with `write`, applies) the stamp for every record that has a
-/// rectangle. A file that already carries a `<DMD>` tag is
-/// the marker of a finished backglass - authored by a B2S editor or stamped
-/// by an earlier run - and is left alone unless `force` asks to overwrite it.
-/// A plan that fails does not stop the run.
+/// rectangle. Each record stamps the targets its file supports: the
+/// `Backglass` element where a grill strip exists, the `ScoreView` element
+/// where the file carries a `DMDImage`. A file that already carries a `<DMD>`
+/// tag is the marker of a finished backglass - authored by a B2S editor or
+/// stamped by an earlier run - and is left alone unless `force` asks to
+/// overwrite it. A plan that fails does not stop the run.
 pub fn stamp(
     records: &[Record],
     glass_roughness: f64,
@@ -219,7 +344,7 @@ pub fn stamp(
         }
     }
     for (i, rec) in records.iter().enumerate() {
-        let (Some(path), Some(rect)) = (rec.b2s_path.as_deref(), rec.chosen) else {
+        let (Some(path), Some(_)) = (rec.b2s_path.as_deref(), rec.chosen) else {
             continue;
         };
         if owner.get(path) != Some(&i) {
@@ -230,12 +355,26 @@ pub fn stamp(
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| path.display().to_string());
-        if rec.existing_dmd.is_some() && !force {
+        let has_tag = rec.existing_dmd.is_some() || !rec.existing_tags.is_empty();
+        if has_tag && !force {
             stats.existing += 1;
             let _ =
                 crate::println!("  skip      {name}  existing <DMD> tag, use --force to overwrite");
             continue;
         }
+        let targets = stamp_targets(rec);
+        if targets.is_empty() {
+            // a rect was chosen but the file supports no target: no grill
+            // strip and no DMDImage, handled by the scan notes
+            stats.skipped += 1;
+            continue;
+        }
+        let owned: Vec<(&str, Rect)> = targets.iter().map(|(t, r)| (t.as_str(), *r)).collect();
+        let existing: Vec<(&str, Rect)> = rec
+            .existing_tags
+            .iter()
+            .map(|(t, r)| (t.as_str(), *r))
+            .collect();
         let bytes = match fs::read(path) {
             Ok(bytes) => bytes,
             Err(e) => {
@@ -244,25 +383,32 @@ pub fn stamp(
                 continue;
             }
         };
-        match plan_bytes(path, &bytes, rect, rec.existing_dmd, glass_roughness) {
-            Ok(plan) => {
-                match plan.action {
-                    Action::Unchanged => stats.unchanged += 1,
-                    Action::Replace => stats.replaced += 1,
-                    Action::Insert => stats.inserted += 1,
+        match plan_all(path, &bytes, &owned, &existing, glass_roughness) {
+            Ok(plans) => {
+                for plan in &plans {
+                    match plan.action {
+                        Action::Unchanged => stats.unchanged += 1,
+                        Action::Replace => stats.replaced += 1,
+                        Action::Insert => stats.inserted += 1,
+                    }
+                    let _ = crate::println!(
+                        "  {:<9} {}  [{:<9}] {} -> {}",
+                        plan.action,
+                        name,
+                        plan.target,
+                        plan.from
+                            .map(|r| r.to_string())
+                            .unwrap_or_else(|| "-".into()),
+                        plan.to
+                    );
                 }
-                let _ = crate::println!(
-                    "  {:<9} {}  {} -> {}",
-                    plan.action,
-                    name,
-                    plan.from
-                        .map(|r| r.to_string())
-                        .unwrap_or_else(|| "-".into()),
-                    plan.to
-                );
-                if write && plan.action != Action::Unchanged {
-                    match apply(&plan, &bytes, backup) {
-                        Ok(_) => stats.written += 1,
+                if write {
+                    match apply_all(&plans, &bytes, backup) {
+                        Ok(_) => {
+                            if plans.iter().any(|p| p.action != Action::Unchanged) {
+                                stats.written += 1;
+                            }
+                        }
                         Err(e) => {
                             stats.failed += 1;
                             let _ = crate::eprintln!("  error   {name}: {e}");
@@ -285,7 +431,7 @@ pub fn print_stats(stats: &Stats, write: bool) {
     let _ = crate::println!("  with a rect       {}", stats.seen);
     let _ = crate::println!("  unchanged         {}", stats.unchanged);
     let _ = crate::println!("  replace tag       {}", stats.replaced);
-    let _ = crate::println!("  insert block      {}", stats.inserted);
+    let _ = crate::println!("  insert tag/block  {}", stats.inserted);
     let _ = crate::println!("  {verb:<18}{}", stats.written);
     if stats.existing > 0 {
         let verb = if write { "left" } else { "skip" };
@@ -313,11 +459,66 @@ fn dmd_tag_span(bytes: &[u8], from: usize, to: usize) -> Option<(usize, usize)> 
     Some((start, end))
 }
 
+/// Every `<DMD>` element inside `[from, to)`.
+fn dmd_spans(bytes: &[u8], from: usize, to: usize) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    let mut cursor = from;
+    while let Some(span @ (_, e)) = dmd_tag_span(bytes, cursor, to) {
+        out.push(span);
+        cursor = e;
+    }
+    out
+}
+
+/// The `Target` attribute of the tag in `[from, to)`; files without one are
+/// the old single-target files, whose element is the backglass.
+fn span_target(bytes: &[u8], from: usize, to: usize) -> String {
+    let text = &bytes[from..to];
+    let key = b"Target=\"";
+    match find_from(text, key, 0) {
+        Some(p) => {
+            let start = from + p + key.len();
+            let end = bytes[start..to]
+                .iter()
+                .position(|&c| c == b'"')
+                .map(|p| start + p)
+                .unwrap_or(start);
+            String::from_utf8_lossy(&bytes[start..end]).into_owned()
+        }
+        None => "Backglass".to_string(),
+    }
+}
+
+/// The rectangle stored in the tag in `[from, to)`.
+fn span_rect(bytes: &[u8], from: usize, to: usize) -> Option<Rect> {
+    let text = &bytes[from..to];
+    let text = std::str::from_utf8(text).ok()?;
+    let number = |key: &str| {
+        let at = text.find(key)? + key.len();
+        let end = text[at..].find('"')? + at;
+        text[at..end].parse::<f64>().ok()
+    };
+    Some(Rect::new(
+        number("X=\"")?,
+        number("Y=\"")?,
+        number("W=\"")?,
+        number("H=\"")?,
+    ))
+}
+
 /// The first byte of the line that holds `at`.
 fn line_start(bytes: &[u8], at: usize) -> usize {
     match bytes[..at].iter().rposition(|&c| c == b'\n') {
         Some(p) => p + 1,
         None => at,
+    }
+}
+
+/// The byte after the end of the line that holds `at` (the newline included).
+fn line_end(bytes: &[u8], at: usize) -> usize {
+    match bytes[at..].iter().position(|&c| c == b'\n') {
+        Some(p) => at + p + 1,
+        None => bytes.len(),
     }
 }
 
@@ -370,10 +571,19 @@ mod tests {
         Rect::new(10.0, 20.0, 120.0, 30.0)
     }
 
+    fn bg() -> (&'static str, Rect) {
+        ("Backglass", target())
+    }
+
     /// reads the file, then plans, as the stamp pass does
-    fn plan_at(path: &Path, to: Rect, current: Option<Rect>, glass: f64) -> Result<Plan, String> {
+    fn plan_at(
+        path: &Path,
+        targets: &[(&str, Rect)],
+        existing: &[(&str, Rect)],
+        glass: f64,
+    ) -> Result<Vec<Plan>, String> {
         let bytes = fs::read(path).map_err(|e| e.to_string())?;
-        plan_bytes(path, &bytes, to, current, glass)
+        plan_all(path, &bytes, targets, existing, glass)
     }
 
     fn tmp_file(name: &str, bytes: &[u8]) -> PathBuf {
@@ -388,9 +598,10 @@ mod tests {
     fn rewrites_the_existing_element_only() {
         let path = tmp_file("has.directb2s", WITH_TAG);
         let current = Rect::new(484.0, 1240.0, 1034.0, 218.0);
-        let plan = plan_at(&path, target(), Some(current), 0.1).unwrap();
-        assert_eq!(plan.action, Action::Replace);
-        apply(&plan, &fs::read(&path).unwrap(), true).unwrap();
+        let plans = plan_at(&path, &[bg()], &[("Backglass", current)], 0.1).unwrap();
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].action, Action::Replace);
+        apply_all(&plans, &fs::read(&path).unwrap(), true).unwrap();
         let text = fs::read_to_string(&path).unwrap();
         assert_eq!(
             text,
@@ -407,12 +618,12 @@ mod tests {
     #[test]
     fn appends_a_displays_block_when_missing() {
         let path = tmp_file("missing.directb2s", NO_DISPLAYS);
-        let plan = plan_at(&path, target(), None, 0.1).unwrap();
-        assert_eq!(plan.action, Action::Insert);
-        apply(&plan, &fs::read(&path).unwrap(), false).unwrap();
+        let plans = plan_at(&path, &[bg()], &[], 0.1).unwrap();
+        assert_eq!(plans[0].action, Action::Insert);
+        apply_all(&plans, &fs::read(&path).unwrap(), false).unwrap();
         let want = String::from_utf8_lossy(NO_DISPLAYS).replace(
             "</DirectB2SData>",
-            &(plan.payload.clone() + "</DirectB2SData>"),
+            &(plans[0].payload.clone() + "</DirectB2SData>"),
         );
         assert_eq!(fs::read_to_string(&path).unwrap(), want);
         assert_eq!(
@@ -427,9 +638,9 @@ mod tests {
     #[test]
     fn fills_an_empty_displays_block() {
         let path = tmp_file("empty.directb2s", EMPTY_DISPLAYS);
-        let plan = plan_at(&path, target(), None, 0.1).unwrap();
-        assert_eq!(plan.action, Action::Insert);
-        apply(&plan, &fs::read(&path).unwrap(), false).unwrap();
+        let plans = plan_at(&path, &[bg()], &[], 0.1).unwrap();
+        assert_eq!(plans[0].action, Action::Insert);
+        apply_all(&plans, &fs::read(&path).unwrap(), false).unwrap();
         assert_eq!(
             fs::read_to_string(&path).unwrap(),
             "<DirectB2SData Version=\"1.2\">\n    <Images>\n    </Images>\n    <Displays>\n        <DMD Target=\"Backglass\" X=\"10\" Y=\"20\" W=\"120\" H=\"30\" GlassRoughness=\"0.1\"/>\n    </Displays>\n</DirectB2SData>\n"
@@ -442,8 +653,8 @@ mod tests {
             "selfclosing.directb2s",
             b"<DirectB2SData Version=\"1.2\">\n    <Images>\n    </Images>\n    <Displays />\n</DirectB2SData>\n",
         );
-        let plan = plan_at(&path, target(), None, 0.1).unwrap();
-        apply(&plan, &fs::read(&path).unwrap(), false).unwrap();
+        let plans = plan_at(&path, &[bg()], &[], 0.1).unwrap();
+        apply_all(&plans, &fs::read(&path).unwrap(), false).unwrap();
         let text = fs::read_to_string(&path).unwrap();
         assert_eq!(text.matches("<Displays").count(), 1);
         assert_eq!(text.matches("<DMD ").count(), 1);
@@ -454,9 +665,9 @@ mod tests {
     fn an_already_correct_tag_is_left_alone() {
         let path = tmp_file("same.directb2s", WITH_TAG);
         let rect = Rect::new(484.0, 1240.0, 1034.0, 218.0);
-        let plan = plan_at(&path, rect, Some(rect), 0.1).unwrap();
-        assert_eq!(plan.action, Action::Unchanged);
-        apply(&plan, &fs::read(&path).unwrap(), false).unwrap();
+        let plans = plan_at(&path, &[("Backglass", rect)], &[("Backglass", rect)], 0.1).unwrap();
+        assert_eq!(plans[0].action, Action::Unchanged);
+        apply_all(&plans, &fs::read(&path).unwrap(), false).unwrap();
         assert_eq!(
             fs::read_to_string(&path).unwrap(),
             String::from_utf8_lossy(WITH_TAG)
@@ -469,32 +680,103 @@ mod tests {
         // 10 that is in the file; otherwise every run rewrites identical bytes
         let path = tmp_file("fractional.directb2s", WITH_TAG);
         let to = Rect::new(484.2, 1240.4, 1034.3, 218.2);
-        let current = Rect::new(484.0, 1240.0, 1034.0, 218.0);
-        let plan = plan_at(&path, to, Some(current), 0.1).unwrap();
-        assert_eq!(plan.action, Action::Unchanged);
-        assert!(plan.payload.is_empty());
+        let plans = plan_at(&path, &[("Backglass", to)], &[], 0.1).unwrap();
+        assert_eq!(plans[0].action, Action::Unchanged);
+        assert!(plans[0].payload.is_empty());
     }
 
     #[test]
     fn the_second_run_finds_nothing_to_do() {
         let path = tmp_file("idempotent.directb2s", NO_DISPLAYS);
         let to = Rect::new(10.4, 20.6, 120.6, 30.6);
-        let first = plan_at(&path, to, None, 0.1).unwrap();
-        assert_eq!(first.action, Action::Insert);
-        apply(&first, &fs::read(&path).unwrap(), false).unwrap();
+        let first = plan_at(&path, &[("Backglass", to)], &[], 0.1).unwrap();
+        assert_eq!(first[0].action, Action::Insert);
+        apply_all(&first, &fs::read(&path).unwrap(), false).unwrap();
         let stamped = fs::read(&path).unwrap();
         // the scan sees no tag before the first run, and the rounded values
         // after it: the second plan must not rewrite the file
-        let second = plan_bytes(
+        let second = plan_all(
             &path,
             &stamped,
-            to,
-            Some(Rect::new(10.0, 21.0, 121.0, 31.0)),
+            &[("Backglass", to)],
+            &[("Backglass", Rect::new(10.0, 21.0, 121.0, 31.0))],
             0.1,
         )
         .unwrap();
-        assert_eq!(second.action, Action::Unchanged);
+        assert_eq!(second[0].action, Action::Unchanged);
         assert_eq!(fs::read(&path).unwrap(), stamped);
+    }
+
+    #[test]
+    fn the_scoreview_target_joins_an_existing_backglass_tag() {
+        // the user's shape: both targets, the same rectangle, the new element
+        // lands below the existing one at the same indentation
+        let path = tmp_file("scoreview.directb2s", WITH_TAG);
+        let current = Rect::new(484.0, 1240.0, 1034.0, 218.0);
+        let plans = plan_at(
+            &path,
+            &[
+                ("Backglass", current),
+                ("ScoreView", Rect::new(484.0, 1240.0, 1034.0, 218.0)),
+            ],
+            &[("Backglass", current)],
+            0.1,
+        )
+        .unwrap();
+        assert_eq!(plans[0].action, Action::Unchanged);
+        assert_eq!(plans[1].action, Action::Insert);
+        apply_all(&plans, &fs::read(&path).unwrap(), false).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            text,
+            "<DirectB2SData Version=\"1.2\">\n    <Images>\n    </Images>\n    <Displays>\n        <DMD Target=\"Backglass\" X=\"484\" Y=\"1240\" W=\"1034\" H=\"218\" GlassRoughness=\"0.1\"/>\n        <DMD Target=\"ScoreView\" X=\"484\" Y=\"1240\" W=\"1034\" H=\"218\" GlassRoughness=\"0.1\"/>\n    </Displays>\n</DirectB2SData>\n"
+        );
+    }
+
+    #[test]
+    fn both_targets_land_in_one_new_block() {
+        let path = tmp_file("both.directb2s", NO_DISPLAYS);
+        let plans = plan_at(
+            &path,
+            &[bg(), ("ScoreView", Rect::new(760.0, 2320.0, 1475.0, 376.0))],
+            &[],
+            0.1,
+        )
+        .unwrap();
+        assert_eq!(plans.len(), 1);
+        apply_all(&plans, &fs::read(&path).unwrap(), false).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert_eq!(text.matches("<Displays").count(), 1);
+        assert_eq!(text.matches("<DMD ").count(), 2);
+        assert!(text.contains("<DMD Target=\"Backglass\" X=\"10\" Y=\"20\" W=\"120\" H=\"30\""));
+        assert!(
+            text.contains("<DMD Target=\"ScoreView\" X=\"760\" Y=\"2320\" W=\"1475\" H=\"376\"")
+        );
+    }
+
+    #[test]
+    fn a_stamped_scoreview_tag_is_replaced_not_duplicated() {
+        let doc = String::from_utf8_lossy(WITH_TAG).replace(
+            "/>\n    </Displays>",
+            "/>\n        <DMD Target=\"ScoreView\" X=\"1\" Y=\"1\" W=\"1\" H=\"1\" GlassRoughness=\"0.1\"/>\n    </Displays>",
+        );
+        let path = tmp_file("hassv.directb2s", doc.as_bytes());
+        let plans = plan_at(
+            &path,
+            &[
+                ("Backglass", Rect::new(484.0, 1240.0, 1034.0, 218.0)),
+                ("ScoreView", target()),
+            ],
+            &[],
+            0.1,
+        )
+        .unwrap();
+        assert_eq!(plans[0].action, Action::Unchanged);
+        assert_eq!(plans[1].action, Action::Replace);
+        apply_all(&plans, &fs::read(&path).unwrap(), false).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert_eq!(text.matches("<DMD ").count(), 2);
+        assert!(text.contains("<DMD Target=\"ScoreView\" X=\"10\" Y=\"20\" W=\"120\" H=\"30\""));
     }
 
     #[test]
@@ -507,6 +789,7 @@ mod tests {
             match_kind: MatchKind::Exact,
             existing_dmd: Some(Rect::new(484.0, 1240.0, 1034.0, 218.0)),
             chosen: Some(target()),
+            grill_height: Some(240.0),
             ..Default::default()
         };
         let recs = [rec];
@@ -529,11 +812,23 @@ mod tests {
         let bak = path.with_file_name("keepbak.directb2s.bak");
         let _ = fs::remove_file(&bak);
         let current = Rect::new(484.0, 1240.0, 1034.0, 218.0);
-        let first = plan_at(&path, target(), Some(current), 0.1).unwrap();
-        apply(&first, &fs::read(&path).unwrap(), true).unwrap();
+        let first = plan_at(
+            &path,
+            &[("Backglass", target())],
+            &[("Backglass", current)],
+            0.1,
+        )
+        .unwrap();
+        apply_all(&first, &fs::read(&path).unwrap(), true).unwrap();
         let original = fs::read(&bak).unwrap();
-        let second = plan_at(&path, Rect::new(1.0, 2.0, 3.0, 4.0), Some(current), 0.1).unwrap();
-        apply(&second, &fs::read(&path).unwrap(), true).unwrap();
+        let second = plan_at(
+            &path,
+            &[("Backglass", Rect::new(1.0, 2.0, 3.0, 4.0))],
+            &[("Backglass", current)],
+            0.1,
+        )
+        .unwrap();
+        apply_all(&second, &fs::read(&path).unwrap(), true).unwrap();
         assert_eq!(fs::read(&bak).unwrap(), original);
     }
 
@@ -546,6 +841,7 @@ mod tests {
             b2s_path: Some(path.clone()),
             match_kind: MatchKind::Similar,
             chosen: Some(Rect::new(1.0, 1.0, 1.0, 1.0)),
+            grill_height: Some(240.0),
             ..Default::default()
         };
         let second = Record {
@@ -553,6 +849,7 @@ mod tests {
             b2s_path: Some(path.clone()),
             match_kind: MatchKind::Exact,
             chosen: Some(rect),
+            grill_height: Some(240.0),
             ..Default::default()
         };
         let stats = stamp(&[first, second], 0.1, true, false, false);
@@ -568,11 +865,11 @@ mod tests {
     #[test]
     fn the_inserted_block_has_the_shape_b2s_pro_writes() {
         let path = tmp_file("shape.directb2s", NO_DISPLAYS);
-        let plan = plan_at(&path, target(), None, 0.1).unwrap();
+        let plans = plan_at(&path, &[bg()], &[], 0.1).unwrap();
         // B2S Pro writes the block at one indent below `</Images>`, the element
         // at two, with the attributes in this order
         assert_eq!(
-            plan.payload,
+            plans[0].payload,
             "    <Displays>\n        <DMD Target=\"Backglass\" X=\"10\" Y=\"20\" W=\"120\" H=\"30\" GlassRoughness=\"0.1\"/>\n    </Displays>\n"
         );
     }
@@ -581,10 +878,10 @@ mod tests {
     fn a_crlf_file_gets_a_crlf_block() {
         let doc = String::from_utf8_lossy(NO_DISPLAYS).replace('\n', "\r\n");
         let path = tmp_file("crlf.directb2s", doc.as_bytes());
-        let plan = plan_at(&path, target(), None, 0.1).unwrap();
-        assert!(plan.payload.contains("\r\n"));
-        assert!(!plan.payload.replace("\r\n", " ").contains('\n'));
-        apply(&plan, &fs::read(&path).unwrap(), false).unwrap();
+        let plans = plan_at(&path, &[bg()], &[], 0.1).unwrap();
+        assert!(plans[0].payload.contains("\r\n"));
+        assert!(!plans[0].payload.replace("\r\n", " ").contains('\n'));
+        apply_all(&plans, &fs::read(&path).unwrap(), false).unwrap();
         let text = fs::read_to_string(&path).unwrap();
         assert_eq!(text.matches("<DMD ").count(), 1);
         assert!(text.contains("    <Displays>\r\n        <DMD Target=\"Backglass\" X=\"10\""));
@@ -596,8 +893,8 @@ mod tests {
             "indented.directb2s",
             b"<DirectB2SData>\n  <Images>\n  </Images>\n  </DirectB2SData>\n",
         );
-        let plan = plan_at(&path, target(), None, 0.1).unwrap();
-        apply(&plan, &fs::read(&path).unwrap(), false).unwrap();
+        let plans = plan_at(&path, &[bg()], &[], 0.1).unwrap();
+        apply_all(&plans, &fs::read(&path).unwrap(), false).unwrap();
         assert_eq!(
             fs::read_to_string(&path).unwrap(),
             "<DirectB2SData>\n  <Images>\n  </Images>\n      <Displays>\n          <DMD Target=\"Backglass\" X=\"10\" Y=\"20\" W=\"120\" H=\"30\" GlassRoughness=\"0.1\"/>\n      </Displays>\n  </DirectB2SData>\n"
@@ -611,8 +908,8 @@ mod tests {
         // made from the tail, not from the file
         let doc = "<DirectB2SData>\n    <Images>\n        <BackglassImage P=\"aaa\r\nbbb\" P2=\"c\"/>\n    </Images>\n</DirectB2SData>\n";
         let path = tmp_file("payload.directb2s", doc.as_bytes());
-        let plan = plan_at(&path, target(), None, 0.1).unwrap();
-        assert!(!plan.payload.contains("\r\n"));
+        let plans = plan_at(&path, &[bg()], &[], 0.1).unwrap();
+        assert!(!plans[0].payload.contains("\r\n"));
     }
 
     #[test]
@@ -620,14 +917,16 @@ mod tests {
         assert_eq!(fmt_glass(0.1), "0.1");
         assert_eq!(fmt_glass(0.25), "0.25");
         assert_eq!(fmt_glass(1.0), "1.0");
-        assert!(tag_text(Rect::new(1.0, 2.0, 3.0, 4.0), 0.1).starts_with(
-            "<DMD Target=\"Backglass\" X=\"1\" Y=\"2\" W=\"3\" H=\"4\" GlassRoughness=\"0.1\"/>"
-        ));
+        assert!(
+            tag_text("Backglass", Rect::new(1.0, 2.0, 3.0, 4.0), 0.1).starts_with(
+                "<DMD Target=\"Backglass\" X=\"1\" Y=\"2\" W=\"3\" H=\"4\" GlassRoughness=\"0.1\"/>"
+            )
+        );
     }
 
     #[test]
     fn a_file_without_the_root_end_tag_is_an_error() {
         let path = tmp_file("broken.directb2s", b"<DirectB2SData></Images>");
-        assert!(plan_at(&path, target(), None, 0.1).is_err());
+        assert!(plan_at(&path, &[bg()], &[], 0.1).is_err());
     }
 }

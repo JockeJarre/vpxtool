@@ -95,9 +95,9 @@ pub fn print(records: &[Record]) {
                 ));
             }
         }
-        if let Some(r) = rec.existing_dmd {
+        for (t, r) in &rec.existing_tags {
             out.push_str(&format!(
-                "  tag   {:.0},{:.0} {:.0}x{:.0}\n",
+                "  tag   {t} {:.0},{:.0} {:.0}x{:.0}\n",
                 r.x, r.y, r.w, r.h
             ));
         }
@@ -111,8 +111,18 @@ pub fn print(records: &[Record]) {
                 "template" => from_template += 1,
                 _ => {}
             }
+            let targets = crate::b2s::scan::stamp_targets(rec);
+            let tlist = if targets.is_empty() {
+                "no target".to_string()
+            } else {
+                targets
+                    .iter()
+                    .map(|(t, _)| t.as_str())
+                    .collect::<Vec<_>>()
+                    .join("+")
+            };
             out.push_str(&format!(
-                "  STAMP {:.0},{:.0} {:.0}x{:.0}  <- {src}\n",
+                "  STAMP {:.0},{:.0} {:.0}x{:.0}  <- {src}  [{tlist}]\n",
                 r.x, r.y, r.w, r.h
             ));
             if let Some(a) = rec.chosen.map(|r| r.aspect()) {

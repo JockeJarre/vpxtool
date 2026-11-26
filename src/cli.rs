@@ -78,6 +78,7 @@ const ARG_METHOD: &str = "METHOD";
 const ARG_ASPECT: &str = "ASPECT";
 const ARG_NATIVE_GRID: &str = "NATIVE_GRID";
 const ARG_MONITOR: &str = "MONITOR";
+const ARG_INI_TARGET: &str = "INI_TARGET";
 const ARG_GLASS: &str = "GLASS";
 const ARG_WRITE: &str = "WRITE";
 const ARG_NO_BACKUP: &str = "NO_BACKUP";
@@ -1733,6 +1734,12 @@ fn build_command() -> Command {
                                 .long("monitor")
                                 .value_name("X,Y,W,H")
                                 .help("The backglass monitor in desktop pixels (default 2560,0,2560,2880, config key b2s_backglass_monitor)"),
+                        )
+                        .arg(
+                            Arg::new(ARG_INI_TARGET)
+                                .long("ini-target")
+                                .value_name("backglass|scoreview")
+                                .help("Which window the DmdDevice.ini DMD rectangles sit on: backglass (the grill cut-out, default) or scoreview (the FullDMD window, maps through the ScreenRes.txt DMD area, config key b2s_ini_target)"),
                         )
                         .arg(
                             Arg::new(ARG_GLASS)
@@ -4433,6 +4440,29 @@ fn handle_b2s_stampdmd(sub_matches: &ArgMatches) -> io::Result<ExitCode> {
         .transpose()
         .map_err(io::Error::other)?;
     let app_config = crate::config::load_config()?.map(|(_, config)| config);
+    // which window the ini's DMD rectangles sit on: the classic cabinets cut
+    // the DMD out of the backglass, the FullDMD cabinets run it on the
+    // ScoreView window over the DMDImage. Command line over config over the
+    // classic default
+    let ini_target = sub_matches
+        .get_one::<String>(ARG_INI_TARGET)
+        .cloned()
+        .or_else(|| {
+            app_config
+                .as_ref()
+                .and_then(|config| config.b2s_ini_target.clone())
+        })
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "backglass".to_string());
+    let ini_target = ini_target
+        .parse::<crate::b2s::IniTarget>()
+        .map_err(io::Error::other)?;
+    // the ScoreView basis maps through the ScreenRes.txt DMD area
+    let screenres = app_config
+        .as_ref()
+        .and_then(|config| config.b2s_screenres.clone())
+        .filter(|p| Path::new(p).is_file())
+        .and_then(|p| crate::b2s::wizard::read_screenres(Path::new(&p)).ok());
     // a monitor from the command line wins over the config file, the config
     // over the default; a cabinet with a 4K playfield monitor needs the config
     // key b2s_backglass_monitor, the ini coords are desktop-absolute
@@ -4466,9 +4496,20 @@ fn handle_b2s_stampdmd(sub_matches: &ArgMatches) -> io::Result<ExitCode> {
         ini_extra.push(config.configured_pinmame_folder().unwrap_or_default());
     }
 
+    // the ini the wizard recorded is the default, the command line wins
+    let ini_path = sub_matches
+        .get_one::<String>(ARG_INI)
+        .map(PathBuf::from)
+        .or_else(|| {
+            app_config
+                .as_ref()
+                .and_then(|config| config.b2s_dmddevice_ini.clone())
+                .filter(|p| Path::new(p).is_file())
+                .map(PathBuf::from)
+        });
     let args = crate::b2s::scan::ScanArgs {
         target,
-        ini: sub_matches.get_one::<String>(ARG_INI).map(PathBuf::from),
+        ini: ini_path,
         method,
         no_hole: sub_matches.get_flag(ARG_NO_HOLE),
         json: sub_matches.get_one::<String>(ARG_JSON).map(PathBuf::from),
@@ -4495,6 +4536,8 @@ fn handle_b2s_stampdmd(sub_matches: &ArgMatches) -> io::Result<ExitCode> {
             .transpose()?
             .unwrap_or_else(crate::b2s::scan::default_jobs),
         ini_extra,
+        ini_target,
+        screenres,
     };
     crate::b2s::scan::scan(args).map_err(io::Error::other)?;
     Ok(ExitCode::SUCCESS)
