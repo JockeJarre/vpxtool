@@ -216,12 +216,16 @@ No file knows that: it is Windows display placement, negative coordinates
 included. The wizard starts from the default arrangement (backglass right of
 the playfield, x0 = playfield width, y0 = 0), asks for the
 **scaling of the backglass monitor** and then for the size and position **as
-the Windows display settings show them** - physical pixels - and multiplies
-them by the scaling into the space of the ini coordinates, where the B2S
-server, vpinmame and DmdDevice.ini live: a 1707x1920 panel at 150% becomes
-2560x2880 at 3840,0. A 100% setup answers what it sees, unchanged. The V6
-`ScreenRes.txt` states the backglass size in the scaled space and is divided
-back into the physical default of the question. Anything fishy with the answers is asked about:
+the Windows display settings show them**. The conversion into the space of
+the ini coordinates, where the B2S server, vpinmame and DmdDevice.ini live,
+is measured from 121 real tables on a mixed-scaling cabinet:
+**the size goes in as it stands, the position gets multiplied by the
+scaling** - a 2560x2880 backglass at 150%, right of a 2560 wide playfield,
+is the monitor 2560x2880 at x 3840 in the ini's space. A 100% setup answers
+what it sees, unchanged. The wizard shows the numbers you typed
+(`2560,0,2560x2880`) and keeps the ini's space (`3840,0,2560x2880`) beside
+it; the config stores the ini's space, because that is what the ini lives
+in. Anything fishy with the answers is asked about:
 values out of range, answers that disagree with `ScreenRes.txt`, an ini with
 two sections, and - the strongest check - the ini's own DMD windows: with
 the right monitor almost all of them fit inside it, with a wrong one almost
@@ -243,12 +247,14 @@ detected DMD window and an ini section, the median offset of the mapped ini
 rect to the detected window says where the candidate is wrong, and the
 wizard corrects it. A median of a few pixels over dozens of tables means the
 geometry is right; the wizard shows the numbers, and writes the rectangle to
-the config key `b2s_backglass_monitor`. `b2s_backglass_monitor` is in the coordinate space of `DmdDevice.ini` - the
-desktop as classic Win32 programs see it. On a display with scaling, that is
-the scaled space: a 1707x1920 panel at 150% is 2560x2880 at x 3840 there, and
-those are the numbers to use (physical times the scale factor). Display
-settings show the physical pixels; the wizard measures the scaled ones and is
-the safe route on a machine with scaling.
+the config key `b2s_backglass_monitor`. `b2s_backglass_monitor` is in the coordinate space of `DmdDevice.ini`: the
+size is the resolution the display settings show, the position is the
+placement multiplied by the backglass scaling (x 2560 at 150% is x 3840).
+Measured on a mixed cabinet: playfield 2560x1440 at 100%, backglass 2560x2880
+at 150% at x 2560 -> `3840,0,2560,2880`, and the ini windows land within a
+few px of the painted DMD windows on 121 tables. The wizard is the safe
+route on a machine with scaling; `--monitor` takes the same numbers it
+writes.
 
 `--monitor` overrides it per run; `--yes` accepts
 the findings without asking.
